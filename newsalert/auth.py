@@ -98,8 +98,15 @@ class DhanAuth:
         self._manual = manual_token
         self._warned_manual = False
         if manual_token:
-            t = token_from_jwt(manual_token, client_id)
-            if self.token is None or t.expiry > self.token.expiry:
+            try:
+                t = token_from_jwt(manual_token, client_id)
+            except AuthError as e:
+                if not self.can_generate:
+                    raise
+                # PIN + TOTP can mint a fresh token, so a stale or mismatched paste isn't fatal.
+                log.warning("ignoring DHAN_ACCESS_TOKEN: %s", e)
+                t = None
+            if t is not None and (self.token is None or t.expiry > self.token.expiry):
                 self.token = t
 
     # -- secrets hygiene ----------------------------------------------------

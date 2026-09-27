@@ -175,3 +175,13 @@ async def test_rejection_reason_shown_but_secrets_masked(tmp_path):
     assert "Invalid pin" in msg and "status=error" in msg
     for secret in (CLIENT_ID, PIN, SECRET, code):
         assert secret not in msg
+
+
+def test_mismatched_pasted_token_ignored_when_totp_available(caplog):
+    other = _jwt("999", 2_000_000_000)
+    with caplog.at_level(logging.WARNING):
+        auth = DhanAuth(None, CLIENT_ID, PIN, SECRET, None, clock=FakeClock(T), manual_token=other)
+    assert auth.token is None and auth.can_generate
+    assert "ignoring DHAN_ACCESS_TOKEN" in caplog.text and other not in caplog.text
+    with pytest.raises(AuthError):   # without TOTP credentials it is still an error
+        DhanAuth(None, CLIENT_ID, "", "", None, clock=FakeClock(T), manual_token=other)
