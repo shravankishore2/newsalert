@@ -271,3 +271,18 @@ def test_close_sma_values_are_shown_distinctly():
     from newsalert.web.app import _pair
     assert _pair(60.4512, 60.4498) == ("60.451", "60.450")
     assert _pair(102.0, 100.5) == ("102.00", "100.50")
+
+
+def test_token_status_falls_back_when_live_has_not_run(tmp_path):
+    db = str(tmp_path / "a.db")
+    Store(db)
+    fb = {"value": {"state": "valid", "expires_at": "2026-09-28T22:03:00+05:30", "auto_refresh": True, "error": None},
+          "updated_at": T0}
+    app = create_app(db_path=db, info=SiteInfo("live", "t", "NIFTY 50", "NIFTY50", "₹", "Asia/Kolkata", TICKERS, PARAMS),
+                     password=PW, prices=lambda *a: [], market=lambda: {"open": False}, static_dir=None,
+                     token_fallback=lambda: fb)
+    c = TestClient(app)
+    login(c)
+    assert c.get("/api/status").json()["token"] == fb
+    Store(db).set_status("token", {"state": "error", "error": "x"})   # live-mode status wins once present
+    assert c.get("/api/status").json()["token"]["value"]["state"] == "error"

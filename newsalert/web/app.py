@@ -126,7 +126,8 @@ def create_app(*, db_path: str, info: SiteInfo, password: str, prices: PriceSour
                static_dir: str | None = "web/dist", push_poll_s: float = 1.0,
                session_hours: float = 12, secret: bytes | None = None,
                clock: Callable[[], float] = time.time, context_min: int = 60,
-               background: Callable[[], Awaitable[None]] | None = None) -> FastAPI:
+               background: Callable[[], Awaitable[None]] | None = None,
+               token_fallback: Callable[[], dict | None] | None = None) -> FastAPI:
     @contextlib.asynccontextmanager
     async def lifespan(_app):
         task = asyncio.create_task(background()) if background else None
@@ -256,7 +257,8 @@ def create_app(*, db_path: str, info: SiteInfo, password: str, prices: PriceSour
                 st = {r["key"]: {"value": json.loads(r["value"]), "updated_at": r["updated_at"]}
                       for r in conn.execute("SELECT key, value, updated_at FROM status")}
         return {"mode": info.mode, "dataset": info.dataset, "market": market(),
-                "cycle": st.get("cycle"), "token": st.get("token"), "feeds": st.get("feeds"),
+                "cycle": st.get("cycle"), "feeds": st.get("feeds"),
+                "token": st.get("token") or (token_fallback() if token_fallback else None),
                 "replay": st.get("replay"), "server_time": clock()}
 
     @app.get("/api/status")

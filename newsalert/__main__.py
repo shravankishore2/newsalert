@@ -253,7 +253,20 @@ def cmd_serve(args, cfg) -> int:
         return {"open": cal.is_open(now), "now_ts": now.timestamp(), "simulated": False,
                 "next_open": nxt.isoformat() if nxt > now else None, "timezone": cfg["market"]["timezone"]}
 
-    app = create_app(db_path=cfg["db_path"], info=info, password=_password(sec, False),
+    def token_from_cache() -> dict | None:
+        """Before live mode has run, report the cached token's expiry (never the token itself)."""
+        import json as _json
+        try:
+            d = _json.loads(Path(cfg["token_cache_path"]).read_text())
+        except (OSError, ValueError):
+            return None
+        exp = datetime.fromisoformat(d["expiry"])
+        return {"value": {"state": "valid" if exp > datetime.now(timezone.utc) else "missing",
+                          "expires_at": exp.isoformat(),
+                          "auto_refresh": bool(sec.dhan_pin and sec.dhan_totp_secret), "error": None},
+                "updated_at": Path(cfg["token_cache_path"]).stat().st_mtime}
+
+    app = create_app(db_path=cfg["db_path"], info=info, password=_password(sec, False), token_fallback=token_from_cache,
                      prices=lambda s, a, b: quotes.prices_between("quotes", s, a - 1, b), market=market,
                      push_poll_s=cfg["dashboard"]["push_poll_s"], session_hours=cfg["dashboard"]["session_hours"])
     return _serve(app, cfg, args)
