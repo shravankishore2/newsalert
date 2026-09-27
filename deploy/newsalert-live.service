@@ -1,9 +1,12 @@
-# Live monitor for one NSE session. Started by newsalert-live.timer at 09:10 IST on weekdays;
+# Live monitor for one NSE session. Started by newsalert-live.timer at 09:10 IST on weekdays and
+# also enabled at boot, so a reboot mid-session brings it back (a timer only catches up missed runs);
 # ExecCondition skips NSE holidays (config.yaml) and anything after 15:35 without marking a failure.
 [Unit]
 Description=newsalert live monitor (NSE session)
 After=network-online.target
 Wants=network-online.target
+# never stop retrying after repeated failures (default gives up after 5 in 10 s)
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple

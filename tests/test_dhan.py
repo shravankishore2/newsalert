@@ -137,3 +137,24 @@ async def test_token_errors_as_dhan_actually_sends_them(resp):
         with pytest.raises(TokenRejected):
             await dhan.ltp([Instrument("A", "1", "NSE_EQ", "EQUITY")])
     assert dhan.auth.token is None
+
+
+async def test_fetch_history_retries_transient_failures_once():
+    clock = FakeClock(T)
+    fake = FakeDhan(clock)
+    day = int(datetime(2026, 9, 25, 9, 15, tzinfo=IST).timestamp())
+    fake.intraday["2885"] = {"timestamp": [day, day + 60], "close": [1.0, 2.0]}
+    calls = {"n": 0}
+
+    def flaky(req):
+        if req.url.path.endswith("/charts/intraday"):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise httpx.ReadError("connection reset")
+        return fake.handler(req)
+
+    store = Store(":memory:")
+    http, dhan = make(fake, clock, flaky)
+    async with http:
+        rep = await fetch_history(store, dhan, [Instrument("RELIANCE", "2885", "NSE_EQ", "EQUITY")], days=5, now=T)
+    assert rep["retried"] == 1 and rep["failed"] == [] and rep["bars"] == 2

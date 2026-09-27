@@ -1,0 +1,7 @@
+# Triggered by newsalert-archive.service on success: restart the demo so it loads the new day.
+[Unit]
+Description=Restart the newsalert demo after a new price archive
+
+[Service]
+Type=oneshot
+ExecStart=/bin/systemctl try-restart newsalert-demo.service

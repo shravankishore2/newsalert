@@ -1,0 +1,20 @@
+# Archive the day's 1-minute bars (all 500 stocks + NIFTY 50) after the close, so demo mode can
+# replay archived news with matching prices. On success the demo restarts to pick up the new day.
+[Unit]
+Description=newsalert daily price archive (fetch-history for today's session)
+After=network-online.target
+Wants=network-online.target
+OnSuccess=newsalert-demo-restart.service
+StartLimitIntervalSec=7200
+StartLimitBurst=4
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/newsalert
+ExecCondition=/home/ubuntu/newsalert/.venv/bin/python -m newsalert is-trading-window --until 23:59
+ExecStart=/home/ubuntu/newsalert/.venv/bin/python -m newsalert fetch-history --days 1
+TimeoutStartSec=90min
+Restart=on-failure
+RestartSec=10min
+Nice=10

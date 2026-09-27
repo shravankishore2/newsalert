@@ -46,7 +46,8 @@ async def fetch_history(store: Store, dhan: DhanClient, instruments: list[Instru
     queue: asyncio.Queue[Instrument] = asyncio.Queue()
     for ins in instruments:
         queue.put_nowait(ins)
-    report = {"bars": 0, "failed": [], "empty": [], "out_of_session": {}}
+    report = {"bars": 0, "failed": [], "empty": [], "out_of_session": {}, "retried": 0}
+    failed_ins: list[Instrument] = []
 
     async def worker() -> None:
         while True:
@@ -60,6 +61,7 @@ async def fetch_history(store: Store, dhan: DhanClient, instruments: list[Instru
                     rows += await dhan.intraday(ins, s, e, interval=1)
             except FetchError as e:
                 report["failed"].append(f"{ins.symbol}: {e}")
+                failed_ins.append(ins)
                 log.warning("history %s failed: %s", ins.symbol, e)
                 continue
             rows = sorted(dict(rows).items())  # windows share a boundary minute; keep one bar per ts
@@ -74,4 +76,12 @@ async def fetch_history(store: Store, dhan: DhanClient, instruments: list[Instru
             log.info("history %s: %d bars", ins.symbol, len(rows))
 
     await asyncio.gather(*(worker() for _ in range(concurrency)))
+    if failed_ins:
+        # Transient network errors (resets, timeouts) are common on long runs: one more pass.
+        report["retried"] = len(failed_ins)
+        report["failed"] = []
+        for ins in failed_ins:
+            queue.put_nowait(ins)
+        failed_ins.clear()
+        await asyncio.gather(*(worker() for _ in range(min(concurrency, 2))))
     return report

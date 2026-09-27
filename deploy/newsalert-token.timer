@@ -1,0 +1,10 @@
+[Unit]
+Description=Refresh the Dhan token at 08:45 IST on weekdays (holidays skipped by the service)
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 08:45:00 Asia/Kolkata
+Persistent=true
+Unit=newsalert-token.service
+
+[Install]
+WantedBy=timers.target

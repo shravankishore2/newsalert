@@ -3,6 +3,8 @@
 Description=newsalert dashboard (live)
 After=network-online.target
 Wants=network-online.target
+# never stop retrying after repeated failures (default gives up after 5 in 10 s)
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
