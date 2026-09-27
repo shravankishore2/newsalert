@@ -11,6 +11,7 @@ are built without the request URL (which carries the PIN and TOTP), and
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -22,7 +23,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Callable
+from typing import Awaitable, Callable
 
 import httpx
 
@@ -89,10 +90,12 @@ class DhanAuth:
     def __init__(self, http: httpx.AsyncClient, client_id: str, pin: str, totp_secret: str,
                  cache_path: str | Path | None, *, auth_url: str = "https://auth.dhan.co/app/generateAccessToken",
                  refresh_margin: timedelta = timedelta(hours=2),
-                 clock: Callable[[], float] = time.time, manual_token: str = ""):
+                 clock: Callable[[], float] = time.time, manual_token: str = "",
+                 sleep: Callable[[float], Awaitable[None]] = asyncio.sleep):
         self.http, self.client_id, self._pin, self._secret = http, client_id, pin, totp_secret
         self.cache_path = Path(cache_path) if cache_path else None
         self.auth_url, self.refresh_margin, self.clock = auth_url, refresh_margin, clock
+        self._sleep = sleep
         self.token: Token | None = self._load()
         self._last_totp = ""
         self._manual = manual_token
@@ -158,6 +161,11 @@ class DhanAuth:
     async def generate(self) -> Token:
         if not self.can_generate:
             raise AuthError("cannot generate a Dhan token: DHAN_PIN and DHAN_TOTP_SECRET are not set")
+        # Dhan accepts only the current 30 s code. A code computed in the last few seconds of its
+        # window can expire in flight ("Invalid TOTP"), so wait for a fresh window in that case.
+        left = 30 - (self.clock() % 30)
+        if left < 3:
+            await self._sleep(left + 0.5)
         self._last_totp = totp(self._secret, self.clock())
         params = {"dhanClientId": self.client_id, "pin": self._pin, "totp": self._last_totp}
         try:

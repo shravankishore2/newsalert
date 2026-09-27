@@ -185,3 +185,16 @@ def test_mismatched_pasted_token_ignored_when_totp_available(caplog):
     assert "ignoring DHAN_ACCESS_TOKEN" in caplog.text and other not in caplog.text
     with pytest.raises(AuthError):   # without TOTP credentials it is still an error
         DhanAuth(None, CLIENT_ID, "", "", None, clock=FakeClock(T), manual_token=other)
+
+
+async def test_totp_not_sent_in_last_seconds_of_its_window(tmp_path):
+    """A code computed at :28-:30 would expire in flight; generate() waits for the next window."""
+    clock = FakeClock(datetime.fromtimestamp((int(T.timestamp()) // 30) * 30 + 28.5, IST))
+    fake = FakeDhan(clock)
+    http = fake.client()
+    auth = DhanAuth(http, CLIENT_ID, PIN, SECRET, None, clock=clock, sleep=clock.sleep)
+    async with http:
+        await auth.generate()
+    assert clock.sleeps == [2.0]                                  # 1.5 s left + 0.5 s margin
+    assert fake.auth_calls[0]["totp"] == totp(SECRET, clock())    # code from the new window
+    assert int(clock()) % 30 < 3
