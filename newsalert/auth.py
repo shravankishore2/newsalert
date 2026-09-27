@@ -162,13 +162,27 @@ class DhanAuth:
         except ValueError:
             body = {}
         if resp.status_code != 200 or not body.get("accessToken"):
-            # Deliberately omit the URL and body: they can contain the PIN, TOTP or token.
-            raise AuthError(f"token request rejected: HTTP {resp.status_code}")
+            # Never echo the URL (it carries the PIN and TOTP). Dhan's own reason fields are
+            # included, with every credential value masked in case the body echoes one.
+            raise AuthError(f"token request rejected: HTTP {resp.status_code}{self._reason(body)}")
         expiry = self._parse_expiry(body.get("expiryTime"))
         self.token = Token(body["accessToken"], expiry)
         self._save()
         log.info("Dhan access token refreshed; valid until %s", expiry.isoformat(timespec="minutes"))
         return self.token
+
+    def _reason(self, body) -> str:
+        if not isinstance(body, dict):
+            return ""
+        keys = ("status", "errorType", "errorCode", "errorMessage", "message", "remarks", "error")
+        parts = [f"{k}={body[k]}" for k in keys if body.get(k) not in (None, "", {})]
+        if not parts and body:
+            parts = [f"fields={sorted(body)}"]
+        text = "; ".join(str(p) for p in parts)[:300]
+        for secret in self.secret_values():
+            if secret and len(secret) >= 4:
+                text = text.replace(secret, "***")
+        return f" ({text})" if text else ""
 
     def _parse_expiry(self, s: str | None) -> datetime:
         if s:

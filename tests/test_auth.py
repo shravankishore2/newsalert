@@ -157,3 +157,21 @@ def test_pasted_token_is_redacted(tmp_path, caplog):
     auth.install_redaction(logging.getLogger())
     logging.getLogger("x").info("using %s", jwt)
     assert jwt not in caplog.text
+
+
+async def test_rejection_reason_shown_but_secrets_masked(tmp_path):
+    clock = FakeClock(T)
+    code = totp(SECRET, clock())
+
+    def h(req):
+        return httpx.Response(200, json={"status": "error", "message": f"Invalid pin {PIN} or totp {code} for {CLIENT_ID}"})
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(h))
+    auth = DhanAuth(http, CLIENT_ID, PIN, SECRET, None, clock=clock)
+    async with http:
+        with pytest.raises(AuthError) as ei:
+            await auth.generate()
+    msg = str(ei.value)
+    assert "Invalid pin" in msg and "status=error" in msg
+    for secret in (CLIENT_ID, PIN, SECRET, code):
+        assert secret not in msg
