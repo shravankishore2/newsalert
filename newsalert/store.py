@@ -1,4 +1,4 @@
-"""SQLite persistence: alerts, live quotes, API usage counters, historical bars."""
+"""SQLite persistence: alerts, live quotes, historical bars."""
 
 from __future__ import annotations
 
@@ -37,12 +37,6 @@ CREATE TABLE IF NOT EXISTS quotes (
     ts INTEGER NOT NULL,
     price REAL NOT NULL,
     PRIMARY KEY (symbol, ts)
-);
-CREATE TABLE IF NOT EXISTS api_usage (
-    provider TEXT NOT NULL,
-    day TEXT NOT NULL,
-    count INTEGER NOT NULL,
-    PRIMARY KEY (provider, day)
 );
 CREATE TABLE IF NOT EXISTS bars (
     symbol TEXT NOT NULL,
@@ -98,18 +92,6 @@ class Store:
     # --- live quotes --------------------------------------------------------
     def insert_quote(self, symbol: str, ts: int, price: float) -> None:
         self.conn.execute("INSERT OR IGNORE INTO quotes VALUES (?,?,?)", (symbol, ts, price))
-        self.conn.commit()
-
-    # --- api usage ----------------------------------------------------------
-    def usage(self, provider: str, day: str) -> int:
-        row = self.conn.execute("SELECT count FROM api_usage WHERE provider=? AND day=?",
-                                (provider, day)).fetchone()
-        return row[0] if row else 0
-
-    def add_usage(self, provider: str, day: str) -> None:
-        self.conn.execute(
-            """INSERT INTO api_usage VALUES (?,?,1)
-               ON CONFLICT(provider, day) DO UPDATE SET count=count+1""", (provider, day))
         self.conn.commit()
 
     # --- historical bars ------------------------------------------------------

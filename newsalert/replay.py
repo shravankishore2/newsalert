@@ -125,29 +125,30 @@ def _fmt_rate(k: int, n: int) -> str:
     return f"{k}/{n} = {k / n:.1%} (95% CI {lo:.1%}–{hi:.1%})"
 
 
-def _utc(ts: int) -> str:
-    return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+def _fmt_ts(ts: int, tz) -> str:
+    return datetime.fromtimestamp(ts, tz).strftime("%Y-%m-%d %H:%M %Z")
 
 
-def render_results(*, source_desc: str, summary: tuple, trading_days: int, results: dict[str, VariantResult],
+def render_results(*, title: str, source_desc: str, summary: tuple, trading_days: int, results: dict[str, VariantResult],
                    alerts_cfg: dict, replay_cfg: dict, live_latencies: list[float],
-                   min_sample: int, generated: datetime, run_id: str, elapsed_s: float) -> str:
+                   min_sample: int, generated: datetime, run_id: str, elapsed_s: float, tz=timezone.utc,
+                   index_name: str = "the index", caveats: list[str] = ()) -> str:
     rows, n_symbols, t0, t1 = summary
     u, f = results["unfiltered"], results["filtered"]
     ma, cf = alerts_cfg["ma_filter"], alerts_cfg["corr_filter"]
     L = [
-        "# Results",
+        f"## {title}",
         "",
         f"Generated {generated.strftime('%Y-%m-%d %H:%M UTC')} by `python -m newsalert replay` "
         f"(run `{run_id}`, {elapsed_s:.0f} s). All numbers below are measured, none estimated.",
         "",
-        "## Data",
+        "### Data",
         "",
         f"- Source: {source_desc}",
-        f"- Date range: {_utc(t0)} to {_utc(t1)}" if t0 else "- Date range: no data",
+        f"- Date range: {_fmt_ts(t0, tz)} to {_fmt_ts(t1, tz)}" if t0 else "- Date range: no data",
         f"- {trading_days} trading days; {rows:,} price points across {n_symbols} symbols (including the index)",
         "",
-        "## Parameters (config.yaml, not tuned on this data)",
+        "### Parameters (config.yaml, not tuned on this data)",
         "",
         f"- Candidate alert: |move| ≥ {alerts_cfg['move_threshold']:.1%} versus the price "
         f"{alerts_cfg['move_window_min']} min earlier; reference must be at most "
@@ -156,11 +157,11 @@ def render_results(*, source_desc: str, summary: tuple, trading_days: int, resul
         f"{alerts_cfg['warmup_returns']}-sample warm-up. These apply to both variants.",
         f"- MA filter: {ma['fast_min']}-min SMA must be on the move's side of the {ma['slow_min']}-min SMA "
         f"and must itself have moved ≥ {ma['confirm_frac']}× threshold between the reference time and now.",
-        f"- Correlation filter: over the last {cf['returns']} returns, if corr with the index ≥ "
+        f"- Correlation filter: over the last {cf['returns']} returns, if corr with {index_name} ≥ "
         f"{cf['min_corr']}, the move minus beta × index move must still clear the threshold.",
         "",
     ]
-    L += ["## 1. Alert latency", "", "### Replay (in-process)", "",
+    L += ["### 1. Alert latency", "", "#### Replay (in-process)", "",
           "Measured from the moment each price update enters the pipeline to the moment the alert is "
           "committed to SQLite and handed to the sender. The sender in replay is a stub, so this "
           "**does not include Telegram network time**. Measured on the machine that ran the replay.", "",
@@ -171,10 +172,10 @@ def render_results(*, source_desc: str, summary: tuple, trading_days: int, resul
                      f"| {percentile(r.latencies_ms, .95):.3f} ms |")
         else:
             L.append(f"| {r.variant} | 0 | n/a | n/a |")
-    L += ["", "### Live (end to end, including Telegram)", ""]
+    L += ["", "#### Live (end to end, including Telegram)", ""]
     if live_latencies:
-        L += [f"From {len(live_latencies)} delivered live alerts in `alerts.db`: time from Finnhub quote "
-              "response parsed to Telegram `sendMessage` acknowledged.", "",
+        L += [f"From {len(live_latencies)} delivered live alerts in `alerts.db`: time from the price "
+              "response being parsed to Telegram `sendMessage` being acknowledged.", "",
               f"- p50: {percentile(live_latencies, .5):.1f} ms",
               f"- p95: {percentile(live_latencies, .95):.1f} ms"]
         if len(live_latencies) < min_sample:
@@ -185,7 +186,7 @@ def render_results(*, source_desc: str, summary: tuple, trading_days: int, resul
 
     L += [
         "",
-        "## 2. False-alert rate",
+        "### 2. False-alert rate",
         "",
         f"**Definition.** An alert is *false* if, within {replay_cfg['false_alert_window_min']} minutes "
         f"after it fires, the price reverses by more than {replay_cfg['reversal_frac']:.0%} of the move "
@@ -213,23 +214,40 @@ def render_results(*, source_desc: str, summary: tuple, trading_days: int, resul
         f"- Rejected by the filters: {_fmt_rate(sum(rej), len(rej))}",
     ]
     if new:
-        L.append(f"- Filtered-run alerts with no unfiltered twin (should be none): {_fmt_rate(sum(new), len(new))}")
+        L.append(f"- Filtered-run alerts with no unfiltered twin: {_fmt_rate(sum(new), len(new))}. These "
+                 "come from candidates the filtered run couldn't evaluate (e.g. stale index data), which "
+                 "don't start its cooldown.")
     L.append("")
     small = [lbl for r, lbl in ((u, "unfiltered"), (f, "filtered")) if r.evaluable < min_sample]
     if small:
         L += [f"**Sample-size warning:** fewer than {min_sample} evaluable alerts for: "
               f"{', '.join(small)}. Treat that rate as indicative only; the confidence interval shows how wide it is.", ""]
 
-    L += ["## Caveats", "",
-          "- Replay uses 1-minute bars. Live mode polling 500+ tickers under the free Finnhub limit "
-          "only sees each ticker about every 10 minutes, so live alerts are coarser and fire later "
-          "into a move than replay alerts. Replay results measure the logic, not the live cadence.",
-          "- Reversals are judged on 1-minute closes, so a reversal that happens and recovers "
-          "within one minute is not counted.",
-          ""]
+    L += ["### Caveats", ""] + [f"- {c}" for c in caveats] + [
+        "- Reversals are judged on 1-minute closes, so a reversal that happens and recovers "
+        "within one minute is not counted.", ""]
     return "\n".join(L)
 
 
-def write_results(path: str | Path, text: str) -> None:
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    Path(path).write_text(text)
+RESULTS_HEADER = "# Results\n\nOne section per market. Each is regenerated by its own replay run; the others are left as they are.\n"
+
+
+def _markers(key: str) -> tuple[str, str]:
+    return f"<!-- results:{key}:start -->", f"<!-- results:{key}:end -->"
+
+
+def write_results(path: str | Path, key: str, section: str) -> None:
+    """Replace (or append) the `key` section of the results file, keeping other sections."""
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    text = p.read_text() if p.exists() else RESULTS_HEADER
+    start, end = _markers(key)
+    block = f"{start}\n{section.rstrip()}\n{end}"
+    if start in text and end in text:
+        i, j = text.index(start), text.index(end) + len(end)
+        text = text[:i] + block + text[j:]
+    else:
+        # new sections go right after the header, above older ones
+        first = text.find("<!-- results:")
+        text = (text[:first] + block + "\n\n" + text[first:]) if first >= 0 else text.rstrip() + "\n\n" + block + "\n"
+    p.write_text(text)

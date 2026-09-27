@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 
 import yaml
 
-from newsalert.replay import classify, percentile, render_results, replay, wilson
+from newsalert.replay import classify, percentile, render_results, replay, wilson, write_results
 from newsalert.signals import Alert
 from newsalert.store import Store
 
@@ -66,7 +66,7 @@ def test_replay_end_to_end_writes_results(tmp_path):
     assert len(f.latencies_ms) == 1 and f.latencies_ms[0] > 0
     assert len(sink.alerts(run_id, "unfiltered")) == 2
 
-    text = render_results(source_desc="synthetic", summary=src.bar_summary("bars"), trading_days=1, results=res,
+    text = render_results(title="Test market", source_desc="synthetic", summary=src.bar_summary("bars"), trading_days=1, results=res,
                           alerts_cfg=cfg["alerts"], replay_cfg=cfg["replay"], live_latencies=[],
                           min_sample=100, generated=datetime(2026, 9, 27, tzinfo=timezone.utc),
                           run_id=run_id, elapsed_s=1)
@@ -76,3 +76,21 @@ def test_replay_end_to_end_writes_results(tmp_path):
     assert "Sample-size warning" in text
     assert "Not measured" in text                # no live latency data
     assert "30 minutes" in text and "more than 50%" in text
+
+
+def test_write_results_replaces_only_its_own_section(tmp_path):
+    p = tmp_path / "RESULTS.md"
+    write_results(p, "us", "## US\nus numbers v1")
+    write_results(p, "nse", "## NSE\nnse numbers v1")
+    write_results(p, "nse", "## NSE\nnse numbers v2")
+    text = p.read_text()
+    assert text.startswith("# Results")
+    assert "us numbers v1" in text and "nse numbers v2" in text and "nse numbers v1" not in text
+    assert text.count("<!-- results:nse:start -->") == 1
+    assert text.index("## NSE") < text.index("## US")   # newest market listed first
+
+
+def test_shipped_results_keep_us_section_and_numbers():
+    text = open("docs/RESULTS.md").read()
+    assert "<!-- results:us:start -->" in text and "<!-- results:us:end -->" in text
+    assert "761/2715 = 28.0%" in text and "637/2402 = 26.5%" in text

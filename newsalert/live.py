@@ -1,13 +1,18 @@
-"""Live mode: poll Finnhub quotes within the rate limit, run the engine, send alerts.
+"""Live mode: batched Dhan LTP each cycle, run the engine, send alerts.
 
-Scheduling: one shared Finnhub limiter (per-second and per-minute windows). A producer
-walks the ticker list round-robin and interleaves an index quote every `index_every`
-tickers; a few workers pull jobs and fetch. A failed fetch drops that ticker for the
-cycle (nothing is fed to the engine), so no alert is ever computed from stale data.
+Scheduling
+- Dhan's Quote APIs allow 1 request/s and up to 1000 instruments per LTP request, so one
+  request per cycle covers all 500 tickers plus NIFTY 50: every ticker is checked every
+  cycle. The cycle defaults to 60 s so live samples match the 1-minute bars the filters
+  were measured on in replay.
+- Only polls during the NSE session (09:15-15:30 IST) on trading days. Outside it the
+  monitor sleeps until `token_refresh_lead_min` before the next open, refreshes the Dhan
+  token if it would expire before that session ends, then sleeps until the open.
+- A failed LTP request skips the whole cycle; a ticker missing from the reply is skipped
+  for that cycle. Either way the engine sees nothing, so no alert uses stale data.
 
-Latency is measured from the moment a quote response is parsed (received) to the
-moment Telegram acknowledges the alert message (sent). News is fetched after the alert
-is sent and posted as a reply, so news lookups never delay the alert itself.
+Latency is measured from the LTP response being parsed (received) to Telegram
+acknowledging the alert (sent). News is fetched afterwards and posted as a reply.
 """
 
 from __future__ import annotations
@@ -17,87 +22,95 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from typing import Awaitable, Callable
 
-from .clients import FetchError, FinnhubClient, NewsApiClient, TelegramClient
+from .auth import AuthError, DhanAuth
+from .clients import DhanClient, FetchError, Instrument, RssFeed, TelegramClient, TokenRejected, match_news
 from .config import Ticker
+from .market import IST, MarketCalendar
 from .signals import Alert, Engine
 from .store import Store
 
 log = logging.getLogger(__name__)
 
 
-def format_alert(a: Alert, name: str = "") -> str:
+def format_alert(a: Alert, name: str = "", index_name: str = "NIFTY 50") -> str:
     arrow = "▲" if a.direction > 0 else "▼"
-    when = datetime.fromtimestamp(a.ts, timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    when = datetime.fromtimestamp(a.ts, IST).strftime("%Y-%m-%d %H:%M:%S IST")
     lines = [f"{arrow} {a.symbol} {a.move:+.2%} in {(a.ts - a.ref_ts) / 60:.0f} min"
              + (f" — {name}" if name else ""),
-             f"{a.ref_price:.2f} → {a.price:.2f} at {when}"]
+             f"₹{a.ref_price:,.2f} → ₹{a.price:,.2f} at {when}"]
     if a.index_move is not None:
-        extra = f"index {a.index_move:+.2%}"
+        extra = f"{index_name} {a.index_move:+.2%}"
         if a.corr is not None:
             extra += f", corr {a.corr:.2f}, beta {a.beta:.2f}"
         lines.append(extra)
     return "\n".join(lines)
 
 
-def format_news(items: list[dict]) -> str:
+def format_news(items: list) -> str:
     if not items:
-        return "No recent headlines found."
-    return "Headlines:\n" + "\n".join(f"• {n['headline']} ({n['source']})\n  {n['url']}" for n in items)
+        return "No matching announcements or headlines found."
+    return "News:\n" + "\n".join(f"• {n.headline} ({n.source})\n  {n.url}" for n in items)
 
 
 @dataclass
 class CycleStats:
     ok: int = 0
     failed: int = 0
-    stale: int = 0
     alerts: int = 0
     failures: list[str] = field(default_factory=list)
 
 
 class LiveMonitor:
-    def __init__(self, *, tickers: list[Ticker], index_symbol: str, engine: Engine,
-                 finnhub: FinnhubClient, telegram: TelegramClient | None,
-                 newsapi: NewsApiClient | None, store: Store, workers: int = 4,
-                 index_every: int = 10, news_lookback_days: int = 2, newsapi_lookback_days: int = 3):
+    def __init__(self, *, tickers: list[Ticker], index: Instrument, engine: Engine, dhan: DhanClient,
+                 auth: DhanAuth, telegram: TelegramClient | None, feeds: list[RssFeed], store: Store,
+                 calendar: MarketCalendar, cycle_s: float = 60, token_refresh_lead_min: float = 30,
+                 clock: Callable[[], float] = time.time,
+                 sleep: Callable[[float], Awaitable[None]] = asyncio.sleep):
         self.tickers = tickers
         self.names = {t.symbol: t.name for t in tickers}
-        self.index_symbol = index_symbol
-        self.engine, self.finnhub, self.telegram, self.newsapi = engine, finnhub, telegram, newsapi
-        self.store = store
-        self.workers, self.index_every = workers, max(1, index_every)
-        self.news_lookback_days, self.newsapi_lookback_days = news_lookback_days, newsapi_lookback_days
+        self.index = index
+        self.instruments = [index] + [Instrument(t.symbol, t.security_id, "NSE_EQ", "EQUITY") for t in tickers]
+        self.engine, self.dhan, self.auth, self.telegram = engine, dhan, auth, telegram
+        self.feeds, self.store, self.calendar = feeds, store, calendar
+        self.cycle_s, self.refresh_lead = cycle_s, timedelta(minutes=token_refresh_lead_min)
+        self.clock, self.sleep = clock, sleep
         self.run_id = "live-" + uuid.uuid4().hex[:8]
         self._bg: set[asyncio.Task] = set()
 
-    def _jobs(self) -> list[str]:
-        jobs = []
-        for i, t in enumerate(self.tickers):
-            if i % self.index_every == 0:
-                jobs.append(self.index_symbol)
-            jobs.append(t.symbol)
-        return jobs
+    def now(self) -> datetime:
+        return datetime.fromtimestamp(self.clock(), timezone.utc)
 
-    async def _fetch_one(self, symbol: str, stats: CycleStats) -> None:
+    async def run_cycle(self) -> CycleStats:
+        stats = CycleStats()
         try:
-            q = await self.finnhub.quote(symbol)
-        except FetchError as e:  # includes RateLimited; the limiter is already paused
-            stats.failed += 1
-            stats.failures.append(f"{symbol}: {e}")
-            log.warning("skip %s this cycle: %s", symbol, e)
-            return
+            prices = await self.dhan.ltp(self.instruments)
+        except TokenRejected as e:
+            log.warning("cycle skipped: %s; token will be regenerated", e)
+            stats.failed = len(self.instruments)
+            return stats
+        except (FetchError, AuthError) as e:
+            log.warning("cycle skipped: %s", e)
+            stats.failed = len(self.instruments)
+            return stats
         received_ns = time.perf_counter_ns()
-        stats.ok += 1
-        series = self.engine.series.get(q.symbol)
-        if series is not None and series.ts and q.ts <= series.ts[-1]:
-            stats.stale += 1  # no trade since last poll (e.g. market closed)
-            return
-        alert = self.engine.on_price(q.symbol, q.ts, q.price)
-        if alert is not None:
-            stats.alerts += 1
-            await self._dispatch(alert, received_ns)
-        self.store.insert_quote(q.symbol, q.ts, q.price)
+        ts = int(self.clock())
+        # index first, so the correlation filter sees this cycle's index price
+        for ins in self.instruments:
+            px = prices.get(ins.symbol)
+            if px is None:
+                stats.failed += 1
+                stats.failures.append(ins.symbol)
+                continue
+            stats.ok += 1
+            alert = self.engine.on_price(ins.symbol, ts, px)
+            self.store.insert_quote(ins.symbol, ts, px)
+            if alert is not None:
+                stats.alerts += 1
+                await self._dispatch(alert, received_ns)
+        return stats
 
     async def _dispatch(self, alert: Alert, received_ns: int) -> None:
         msg_id, sent_ns = None, None
@@ -117,52 +130,65 @@ class LiveMonitor:
         task.add_done_callback(self._bg.discard)
 
     async def _news(self, alert: Alert, alert_id: int, reply_to: int | None) -> None:
-        today = datetime.now(timezone.utc).date()
-        items: list[dict] = []
-        try:
-            items += await self.finnhub.company_news(alert.symbol, today, self.news_lookback_days)
-        except FetchError as e:
-            log.warning("finnhub news failed for %s: %s", alert.symbol, e)
-        if self.newsapi is not None:
+        found = []
+        for feed in self.feeds:
             try:
-                items += await self.newsapi.headlines(alert.symbol, self.names.get(alert.symbol, ""),
-                                                      today, self.newsapi_lookback_days)
+                found += match_news(await feed.items(), alert.symbol, self.names.get(alert.symbol, ""))
             except FetchError as e:
-                log.warning("newsapi failed for %s: %s", alert.symbol, e)
-        self.store.set_alert_news(alert_id, items)
+                log.warning("news feed %s failed: %s", feed.name, e)
+        self.store.set_alert_news(alert_id, [{"source": n.source, "headline": n.headline, "url": n.url,
+                                              "published": n.published} for n in found])
         if self.telegram is not None and reply_to is not None:
             try:
-                await self.telegram.send(format_news(items), reply_to=reply_to)
+                await self.telegram.send(format_news(found), reply_to=reply_to)
             except FetchError as e:
                 log.warning("telegram news reply failed: %s", e)
-
-    async def run_cycle(self) -> CycleStats:
-        stats = CycleStats()
-        queue: asyncio.Queue[str] = asyncio.Queue()
-        for s in self._jobs():
-            queue.put_nowait(s)
-
-        async def worker() -> None:
-            while True:
-                try:
-                    sym = queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    return
-                await self._fetch_one(sym, stats)
-
-        await asyncio.gather(*(worker() for _ in range(self.workers)))
-        return stats
 
     async def drain(self) -> None:
         if self._bg:
             await asyncio.gather(*self._bg, return_exceptions=True)
 
-    async def run(self, cycles: int | None = None) -> None:
+    async def pre_open(self, session_close: datetime) -> None:
+        """Make sure the token outlives the coming session (refresh margin included)."""
+        tok = self.auth.token
+        if tok is None or tok.expiry < session_close + self.auth.refresh_margin:
+            try:
+                await self.auth.generate()
+            except AuthError as e:
+                log.error("pre-open token refresh failed: %s (will retry on first request)", e)
+
+    async def _sleep_until(self, when: datetime) -> None:
+        while True:
+            left = (when - self.now()).total_seconds()
+            if left <= 0:
+                return
+            await self.sleep(min(left, 3600))
+
+    async def run(self, max_cycles: int | None = None, stop_after: datetime | None = None) -> None:
         n = 0
-        while cycles is None or n < cycles:
-            start = time.monotonic()
+        refreshed_for: datetime | None = None
+        while max_cycles is None or n < max_cycles:
+            now = self.now()
+            if stop_after and now >= stop_after:
+                break
+            nxt = self.calendar.next_open(now)
+            if nxt > now:  # market closed: wait for pre-open, refresh token, wait for open
+                log.info("market closed; next session opens %s", nxt.astimezone(IST).isoformat(timespec="minutes"))
+                if stop_after and nxt - self.refresh_lead >= stop_after:
+                    await self._sleep_until(stop_after)
+                    break
+                await self._sleep_until(nxt - self.refresh_lead)
+                if refreshed_for != nxt:
+                    _, close = self.calendar.session(nxt.astimezone(IST).date())
+                    await self.pre_open(close)
+                    refreshed_for = nxt
+                await self._sleep_until(nxt)
+                continue
+            start = self.clock()
             stats = await self.run_cycle()
             n += 1
-            log.info("cycle %d: %d ok, %d failed, %d unchanged, %d alerts in %.1fs",
-                     n, stats.ok, stats.failed, stats.stale, stats.alerts, time.monotonic() - start)
+            log.info("cycle %d: %d ok, %d failed, %d alerts in %.2fs",
+                     n, stats.ok, stats.failed, stats.alerts, self.clock() - start)
+            # align to the next cycle boundary
+            await self.sleep(max(0.0, self.cycle_s - (self.clock() - start)))
         await self.drain()

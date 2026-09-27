@@ -1,33 +1,78 @@
-# News Monitor configuration. Secrets live in .env, not here.
+# News Monitor configuration (NSE). Secrets live in .env, not here.
 
-tickers_file: tickers.csv
-index_symbol: SPY
-db_path: data/alerts.db            # live alerts, live quotes, API usage counters
-history_db_path: data/history.db   # yfinance minute bars for replay
+tickers_file: tickers.csv          # Nifty 500 constituents with Dhan security IDs
+db_path: data/alerts.db            # live alerts, live quotes
+history_db_path: data/history.db   # Dhan 1-minute bars for replay
+token_cache_path: data/dhan_token.json   # gitignored, mode 600
 
-finnhub:
-  base_url: https://finnhub.io/api/v1
-  # Free tier: 60 calls/min (third-party sources; Finnhub's pricing page is
-  # JS-rendered and could not be read) plus a 30 calls/s hard cap (official
-  # docs). We stay under both with headroom.
-  calls_per_minute: 55
-  calls_per_second: 25
-  workers: 4
-  index_every: 10        # fetch the index quote once per N ticker quotes
-  timeout_s: 10
-  news_lookback_days: 2
+index:
+  symbol: NIFTY50
+  name: NIFTY 50
+  security_id: "13"                # Dhan scrip master: NSE, INDEX, "Nifty 50"
+  segment: IDX_I
+  instrument: INDEX
 
-newsapi:
-  enabled: true          # only used when an alert fires, if NEWSAPI_API_KEY is set
-  base_url: https://newsapi.org/v2
-  daily_budget: 90       # free plan: 100 requests/day
-  lookback_days: 3       # free plan articles are delayed 24h
-  timeout_s: 10
+market:
+  timezone: Asia/Kolkata
+  open: "09:15"
+  close: "15:30"
+  # NSE equity-segment (CM) trading holidays. Source: NSE holiday calendar
+  # (nseindia.com, "Trading Holidays", CM segment), copied 2026-09-27. Update yearly;
+  # a year missing here logs a warning and treats every weekday as a trading day.
+  # Special sessions (e.g. Diwali Muhurat trading) are not modelled.
+  holidays:
+    2026:
+      - 2026-01-15   # Municipal Corporation Election - Maharashtra
+      - 2026-01-26   # Republic Day
+      - 2026-02-15   # Mahashivratri (Sunday)
+      - 2026-03-03   # Holi
+      - 2026-03-21   # Id-Ul-Fitr (Saturday)
+      - 2026-03-26   # Shri Ram Navami
+      - 2026-03-31   # Shri Mahavir Jayanti
+      - 2026-04-03   # Good Friday
+      - 2026-04-14   # Dr. Baba Saheb Ambedkar Jayanti
+      - 2026-05-01   # Maharashtra Day
+      - 2026-05-28   # Bakri Id
+      - 2026-06-26   # Muharram
+      - 2026-08-15   # Independence Day (Saturday)
+      - 2026-09-14   # Ganesh Chaturthi
+      - 2026-10-02   # Mahatma Gandhi Jayanti
+      - 2026-10-20   # Dussehra
+      - 2026-11-08   # Diwali Laxmi Pujan (Sunday; Muhurat session not modelled)
+      - 2026-11-10   # Diwali-Balipratipada
+      - 2026-11-24   # Prakash Gurpurb Sri Guru Nanak Dev
+      - 2026-12-25   # Christmas
+
+dhan:
+  base_url: https://api.dhan.co/v2
+  auth_url: https://auth.dhan.co/app/generateAccessToken
+  # Limits from dhanhq.co/docs/v2 (checked 2026-09-27):
+  #   Quote APIs (LTP): 1 request/s, up to 1000 instruments per request
+  #   Data APIs (historical): 5 requests/s, 100,000 requests/day
+  quote_per_second: 1
+  data_per_second: 4         # headroom under 5/s
+  data_per_day: 90000        # headroom under 100,000/day
+  timeout_s: 15
+  cycle_s: 60                # one LTP batch per minute, matching the 1-minute replay bars
+  token_refresh_lead_min: 30 # refresh before the open (08:45 IST)
+  token_refresh_margin_h: 2  # also refresh when a token has less than this left
+
+news:
+  cache_ttl_s: 300           # each feed fetched at most once per 5 min, only when alerts fire
+  feeds:
+    # Terms reviewed 2026-09-27; see README "News sources". Personal, non-commercial use.
+    - name: NSE announcements
+      url: https://nsearchives.nseindia.com/content/RSS/Online_announcements.xml
+    - name: BusinessLine markets
+      url: https://www.thehindubusinessline.com/markets/feeder/default.rss
+    - name: BusinessLine companies
+      url: https://www.thehindubusinessline.com/companies/feeder/default.rss
 
 telegram:
   base_url: https://api.telegram.org
   timeout_s: 10
 
+# Alert and replay settings are unchanged from the US run (not retuned for NSE).
 alerts:
   move_window_min: 15        # move measured against the price this long ago
   move_threshold: 0.015      # |move| >= 1.5% triggers a candidate alert
@@ -48,4 +93,4 @@ alerts:
 replay:
   false_alert_window_min: 30
   reversal_frac: 0.5         # false if it gives back more than this share of the move
-  history_days: 29           # yfinance keeps ~30 days of 1-minute bars
+  history_days: 90           # one Dhan intraday request per instrument (90-day cap)

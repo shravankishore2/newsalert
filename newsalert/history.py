@@ -1,55 +1,77 @@
-"""Download 1-minute bars from Yahoo Finance (yfinance) for replay.
+"""Download 1-minute bars from Dhan's intraday historical endpoint for replay.
 
-Finnhub's /stock/candle endpoint is premium-only, so replay history comes from
-yfinance instead. Yahoo serves 1-minute bars for roughly the last 30 days, at most
-8 days per request.
+Dhan serves 1-minute bars for up to 5 years back, at most 90 days per request, under the
+Data API limits (5 requests/s, 100,000/day). One request per instrument covers 90 days.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
-import math
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta
 
+from .clients import DhanClient, FetchError, Instrument
+from .market import IST
 from .store import Store
 
 log = logging.getLogger(__name__)
 
-
-def to_yahoo(symbol: str) -> str:
-    return symbol.replace(".", "-")  # BRK.B -> BRK-B
+MAX_DAYS_PER_REQUEST = 90
 
 
-def fetch_history(store: Store, symbols: list[str], days: int, *, chunk_days: int = 7,
-                  batch: int = 100, now: datetime | None = None, download=None) -> int:
-    """Fetch bars into `store`. `download` defaults to yfinance.download (injectable for tests)."""
-    if download is None:
-        import yfinance as yf
-        download = yf.download
-    now = now or datetime.now(timezone.utc)
-    start = (now - timedelta(days=days)).date()
-    end = now.date() + timedelta(days=1)
-    total = 0
-    for i in range(0, len(symbols), batch):
-        group = symbols[i:i + batch]
-        ymap = {to_yahoo(s): s for s in group}
-        d0 = start
-        while d0 < end:
-            d1 = min(d0 + timedelta(days=chunk_days), end)
-            df = download(list(ymap), start=d0.isoformat(), end=d1.isoformat(), interval="1m",
-                          group_by="ticker", auto_adjust=False, progress=False, threads=True)
+def chunks(start: datetime, end: datetime, days: int = MAX_DAYS_PER_REQUEST) -> list[tuple[datetime, datetime]]:
+    out, s = [], start
+    while s < end:
+        e = min(s + timedelta(days=days), end)
+        out.append((s, e))
+        s = e
+    return out
+
+
+def session_fraction(ts_list: list[int], open_t: time, close_t: time) -> float:
+    """Share of bar timestamps that fall inside the NSE session in IST. Well under 1.0
+    means the epoch isn't what we think (e.g. IST wall time encoded as UTC)."""
+    if not ts_list:
+        return 1.0
+    inside = sum(open_t <= datetime.fromtimestamp(t, IST).time() < close_t for t in ts_list)
+    return inside / len(ts_list)
+
+
+async def fetch_history(store: Store, dhan: DhanClient, instruments: list[Instrument], days: int,
+                        now: datetime, *, concurrency: int = 4, open_t: time = time(9, 15),
+                        close_t: time = time(15, 30)) -> dict:
+    end = now.astimezone(IST)
+    start = end - timedelta(days=days)
+    windows = chunks(start, end)
+    queue: asyncio.Queue[Instrument] = asyncio.Queue()
+    for ins in instruments:
+        queue.put_nowait(ins)
+    report = {"bars": 0, "failed": [], "empty": [], "out_of_session": {}}
+
+    async def worker() -> None:
+        while True:
+            try:
+                ins = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
             rows = []
-            if df is not None and len(df):
-                for ysym, sym in ymap.items():
-                    try:
-                        closes = df[ysym]["Close"] if df.columns.nlevels > 1 else df["Close"]
-                    except KeyError:
-                        continue
-                    for ts, px in closes.items():
-                        if px is not None and not math.isnan(px):
-                            rows.append((sym, int(ts.timestamp()), float(px)))
-            store.insert_bars(rows)
-            total += len(rows)
-            log.info("bars %s..%s symbols %d-%d: %d rows", d0, d1, i, i + len(group), len(rows))
-            d0 = d1
-    return total
+            try:
+                for s, e in windows:
+                    rows += await dhan.intraday(ins, s, e, interval=1)
+            except FetchError as e:
+                report["failed"].append(f"{ins.symbol}: {e}")
+                log.warning("history %s failed: %s", ins.symbol, e)
+                continue
+            rows = sorted(dict(rows).items())  # windows share a boundary minute; keep one bar per ts
+            if not rows:
+                report["empty"].append(ins.symbol)
+                continue
+            frac = session_fraction([t for t, _ in rows], open_t, close_t)
+            if frac < 0.95:
+                report["out_of_session"][ins.symbol] = round(frac, 3)
+            store.insert_bars([(ins.symbol, t, c) for t, c in rows])
+            report["bars"] += len(rows)
+            log.info("history %s: %d bars", ins.symbol, len(rows))
+
+    await asyncio.gather(*(worker() for _ in range(concurrency)))
+    return report

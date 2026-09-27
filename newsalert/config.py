@@ -14,20 +14,25 @@ from dotenv import load_dotenv
 
 @dataclass(frozen=True)
 class Secrets:
-    finnhub_api_key: str
-    newsapi_api_key: str
+    dhan_client_id: str
+    dhan_pin: str
+    dhan_totp_secret: str
     telegram_bot_token: str
     telegram_chat_id: str
 
     def missing(self, *names: str) -> list[str]:
-        """Env-var names (e.g. FINNHUB_API_KEY) of the given fields that are empty."""
+        """Env-var names (e.g. DHAN_PIN) of the given fields that are empty."""
         return [n.upper() for n in names if not getattr(self, n)]
+
+    def __repr__(self) -> str:  # never print secret values
+        return "Secrets(" + ", ".join(f"{k}={'set' if v else 'unset'}" for k, v in vars(self).items()) + ")"
 
 
 @dataclass(frozen=True)
 class Ticker:
     symbol: str
     name: str
+    security_id: str
 
 
 def load_config(path: str | Path = "config.yaml") -> dict[str, Any]:
@@ -38,8 +43,9 @@ def load_config(path: str | Path = "config.yaml") -> dict[str, Any]:
 def load_secrets(env_file: str | Path = ".env") -> Secrets:
     load_dotenv(env_file)
     return Secrets(
-        finnhub_api_key=os.getenv("FINNHUB_API_KEY", ""),
-        newsapi_api_key=os.getenv("NEWSAPI_API_KEY", ""),
+        dhan_client_id=os.getenv("DHAN_CLIENT_ID", ""),
+        dhan_pin=os.getenv("DHAN_PIN", ""),
+        dhan_totp_secret=os.getenv("DHAN_TOTP_SECRET", ""),
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
         telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
     )
@@ -47,4 +53,5 @@ def load_secrets(env_file: str | Path = ".env") -> Secrets:
 
 def load_tickers(path: str | Path) -> list[Ticker]:
     with open(path, newline="") as f:
-        return [Ticker(r["symbol"].strip(), r.get("name", "").strip()) for r in csv.DictReader(f)]
+        return [Ticker(r["symbol"].strip(), r.get("name", "").strip(), r["security_id"].strip())
+                for r in csv.DictReader(f)]
