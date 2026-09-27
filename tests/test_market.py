@@ -45,3 +45,22 @@ def test_unknown_year_warns_and_assumes_weekdays_trade(caplog):
         assert cal.is_trading_day(date(2027, 1, 26))    # would be Republic Day, but 2027 isn't configured
         assert cal.is_trading_day(date(2027, 1, 27))
     assert sum("no NSE holiday list for 2027" in r.getMessage() for r in caplog.records) == 1
+
+
+def _run_window(monkeypatch, now):
+    import newsalert.__main__ as m
+
+    class FixedDT(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now.astimezone(tz) if tz else now
+
+    monkeypatch.setattr(m, "datetime", FixedDT)
+    return m.main(["is-trading-window", "--until", "15:35"])
+
+
+def test_trading_window_for_systemd(monkeypatch):
+    assert _run_window(monkeypatch, ist(2026, 9, 28, 9, 10)) == 0     # Monday before the open
+    assert _run_window(monkeypatch, ist(2026, 9, 28, 15, 36)) == 1    # after the cutoff
+    assert _run_window(monkeypatch, ist(2026, 10, 2, 9, 10)) == 1     # Gandhi Jayanti holiday
+    assert _run_window(monkeypatch, ist(2026, 10, 3, 9, 10)) == 1     # Saturday

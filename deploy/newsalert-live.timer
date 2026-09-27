@@ -1,0 +1,11 @@
+[Unit]
+Description=Start the newsalert live monitor at 09:10 IST on weekdays (holidays skipped by the service)
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 09:10:00 Asia/Kolkata
+# If the VM was down at 09:10, start on boot; ExecCondition still stops it after 15:35.
+Persistent=true
+Unit=newsalert-live.service
+
+[Install]
+WantedBy=timers.target

@@ -71,6 +71,29 @@ def _dhan(http: httpx.AsyncClient, cfg: dict, auth: DhanAuth) -> DhanClient:
                       RateLimiter([(d["data_per_second"], 1.0), (d["data_per_day"], 86400.0)]), d["base_url"])
 
 
+def _today_at(hhmm: str, cfg: dict) -> datetime:
+    """Today's HH:MM in the market's timezone, as an aware datetime."""
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo(cfg["market"]["timezone"])
+    h, m = (int(x) for x in hhmm.split(":"))
+    return datetime.now(tz).replace(hour=h, minute=m, second=0, microsecond=0)
+
+
+def cmd_is_trading_window(args, cfg) -> int:
+    """Exit 0 if today is an NSE trading day and it's before --until; 1 otherwise.
+    Used as systemd ExecCondition, where exit 1 skips the run without marking it failed."""
+    cal = MarketCalendar.from_config(cfg["market"])
+    now = datetime.now(IST)
+    if not cal.is_trading_day(now.date()):
+        print(f"{now.date()} is not an NSE trading day")
+        return 1
+    if now >= _today_at(args.until, cfg):
+        print(f"past {args.until} IST")
+        return 1
+    print(f"{now.date()} is a trading day; running until {args.until} IST")
+    return 0
+
+
 def cmd_build_universe(args, cfg) -> int:
     from .universe import SCRIP_MASTER_URL, build_universe, write_tickers
     nifty = Path(args.nifty500_csv).read_text()
@@ -117,6 +140,9 @@ async def cmd_live(args, cfg) -> int:
             auth=auth, feeds=feeds, store=store, calendar=MarketCalendar.from_config(cfg["market"]),
             cycle_s=cfg["dhan"]["cycle_s"], token_refresh_lead_min=cfg["dhan"]["token_refresh_lead_min"])
         stop = datetime.now(timezone.utc) + timedelta(minutes=args.minutes) if args.minutes else None
+        if args.until:
+            cut = _today_at(args.until, cfg)
+            stop = min(stop, cut) if stop else cut
         await mon.run(max_cycles=args.cycles, stop_after=stop)
     store.close()
     return 0
@@ -351,6 +377,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--tickers", help="comma-separated subset, e.g. RELIANCE,TCS,INFY")
     p.add_argument("--cycles", type=int, help="stop after N polling cycles")
     p.add_argument("--minutes", type=float, help="stop after N minutes")
+    p.add_argument("--until", help="stop at this time today, market timezone (e.g. 15:35)")
+    p = sub.add_parser("is-trading-window", help="exit 0 on an NSE trading day before --until (for systemd)")
+    p.add_argument("--until", default="15:35")
     p = sub.add_parser("serve", help="dashboard over live data (run `live` alongside)")
     p.add_argument("--host")
     p.add_argument("--port", type=int)
@@ -381,6 +410,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_build_universe(args, cfg)
     if args.cmd == "replay":
         return cmd_replay(args, cfg)
+    if args.cmd == "is-trading-window":
+        return cmd_is_trading_window(args, cfg)
     if args.cmd == "serve":
         return cmd_serve(args, cfg)
     if args.cmd == "demo":

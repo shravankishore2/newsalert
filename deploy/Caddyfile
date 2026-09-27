@@ -1,0 +1,25 @@
+# HTTPS via Let's Encrypt. {$NEWSALERT_HOST} is e.g. 68-233-96-25.sslip.io (sslip.io resolves
+# a-b-c-d.sslip.io to a.b.c.d, so no DNS setup is needed; swap in your own domain any time).
+{$NEWSALERT_HOST} {
+	encode gzip
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Robots-Tag "noindex, nofollow"
+		-Server
+	}
+	reverse_proxy 127.0.0.1:8000 {
+		flush_interval -1   # stream server-sent events immediately
+	}
+}
+
+demo.{$NEWSALERT_HOST} {
+	encode gzip
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Robots-Tag "noindex, nofollow"
+		-Server
+	}
+	reverse_proxy 127.0.0.1:8001 {
+		flush_interval -1
+	}
+}

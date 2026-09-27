@@ -1,0 +1,18 @@
+# Dashboard driven by replayed NSE history, labelled as replay data. Localhost only.
+[Unit]
+Description=newsalert dashboard (demo, replay data)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/newsalert
+ExecStart=/home/ubuntu/newsalert/.venv/bin/python -m newsalert demo --dataset nse --host 127.0.0.1 --port 8001
+Restart=always
+RestartSec=10
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

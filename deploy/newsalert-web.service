@@ -1,0 +1,18 @@
+# Dashboard over live data. Localhost only; Caddy terminates HTTPS in front of it.
+[Unit]
+Description=newsalert dashboard (live)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/newsalert
+ExecStart=/home/ubuntu/newsalert/.venv/bin/python -m newsalert serve --host 127.0.0.1 --port 8000
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
