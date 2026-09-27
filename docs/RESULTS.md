@@ -1,0 +1,49 @@
+# Results
+
+Generated 2026-09-27 12:23 UTC by `python -m newsalert replay` (run `replay-326ed751`, 13 s). All numbers below are measured, none estimated.
+
+## Data
+
+- Source: Yahoo Finance 1-minute bars via yfinance (Finnhub candles are premium-only)
+- Date range: 2026-08-31 13:30 UTC to 2026-09-25 19:59 UTC
+- 19 trading days; 3,521,879 price points across 504 symbols (including the index)
+
+## Parameters (config.yaml, not tuned on this data)
+
+- Candidate alert: |move| ≥ 1.5% versus the price 15 min earlier; reference must be at most 10 min older than that; 30 min per-ticker cooldown; 30-sample warm-up. These apply to both variants.
+- MA filter: 5-min SMA must be on the move's side of the 60-min SMA and must itself have moved ≥ 0.5× threshold between the reference time and now.
+- Correlation filter: over the last 30 returns, if corr with the index ≥ 0.6, the move minus beta × index move must still clear the threshold.
+
+## 1. Alert latency
+
+### Replay (in-process)
+
+Measured from the moment each price update enters the pipeline to the moment the alert is committed to SQLite and handed to the sender. The sender in replay is a stub, so this **does not include Telegram network time**. Measured on the machine that ran the replay.
+
+| Variant | Alerts | p50 | p95 |
+|---|---:|---:|---:|
+| unfiltered | 2780 | 0.220 ms | 0.373 ms |
+| filtered | 2453 | 0.250 ms | 0.414 ms |
+
+### Live (end to end, including Telegram)
+
+**Not measured.** No delivered live alerts exist in `alerts.db` yet, so there is no end-to-end number. Run live mode during market hours to collect one.
+
+## 2. False-alert rate
+
+**Definition.** An alert is *false* if, within 30 minutes after it fires, the price reverses by more than 50% of the move (move = alert price − reference price). Prices are 1-minute bar closes. Alerts whose 30-minute forward window is not fully covered by same-session data (e.g. near the close) are *not evaluable* and are left out of the rate.
+
+| Variant | Alerts | Evaluable | False-alert rate |
+|---|---:|---:|---|
+| Without filters | 2780 | 2715 | 761/2715 = 28.0% (95% CI 26.4%–29.7%) |
+| With MA + correlation filters | 2453 | 2402 | 637/2402 = 26.5% (95% CI 24.8%–28.3%) |
+
+**Where the difference comes from.** A filter rejection starts the per-ticker cooldown just like an alert does, so the filtered alerts are a subset of the unfiltered ones. Each unfiltered alert was either kept or rejected by the filters; these groups don't overlap:
+
+- Kept by the filters: 637/2402 = 26.5% (95% CI 24.8%–28.3%)
+- Rejected by the filters: 124/313 = 39.6% (95% CI 34.4%–45.1%)
+
+## Caveats
+
+- Replay uses 1-minute bars. Live mode polling 500+ tickers under the free Finnhub limit only sees each ticker about every 10 minutes, so live alerts are coarser and fire later into a move than replay alerts. Replay results measure the logic, not the live cadence.
+- Reversals are judged on 1-minute closes, so a reversal that happens and recovers within one minute is not counted.

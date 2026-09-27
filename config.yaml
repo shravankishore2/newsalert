@@ -1,0 +1,51 @@
+# News Monitor configuration. Secrets live in .env, not here.
+
+tickers_file: tickers.csv
+index_symbol: SPY
+db_path: data/alerts.db            # live alerts, live quotes, API usage counters
+history_db_path: data/history.db   # yfinance minute bars for replay
+
+finnhub:
+  base_url: https://finnhub.io/api/v1
+  # Free tier: 60 calls/min (third-party sources; Finnhub's pricing page is
+  # JS-rendered and could not be read) plus a 30 calls/s hard cap (official
+  # docs). We stay under both with headroom.
+  calls_per_minute: 55
+  calls_per_second: 25
+  workers: 4
+  index_every: 10        # fetch the index quote once per N ticker quotes
+  timeout_s: 10
+  news_lookback_days: 2
+
+newsapi:
+  enabled: true          # only used when an alert fires, if NEWSAPI_API_KEY is set
+  base_url: https://newsapi.org/v2
+  daily_budget: 90       # free plan: 100 requests/day
+  lookback_days: 3       # free plan articles are delayed 24h
+  timeout_s: 10
+
+telegram:
+  base_url: https://api.telegram.org
+  timeout_s: 10
+
+alerts:
+  move_window_min: 15        # move measured against the price this long ago
+  move_threshold: 0.015      # |move| >= 1.5% triggers a candidate alert
+  max_ref_staleness_min: 10  # reference price must be at most window+this old
+  cooldown_min: 30           # one alert per ticker per cooldown
+  warmup_returns: 30         # history needed before any alert (both modes)
+  ma_filter:
+    enabled: true
+    fast_min: 5              # fast SMA window
+    slow_min: 60             # slow SMA window
+    confirm_frac: 0.5        # fast SMA (now vs at ref time) must move >= this * threshold
+  corr_filter:
+    enabled: true
+    returns: 30              # number of recent returns used for corr/beta
+    min_corr: 0.6            # only de-market tickers that track the index
+    index_max_staleness_min: 3
+
+replay:
+  false_alert_window_min: 30
+  reversal_frac: 0.5         # false if it gives back more than this share of the move
+  history_days: 29           # yfinance keeps ~30 days of 1-minute bars
