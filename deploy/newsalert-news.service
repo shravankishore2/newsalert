@@ -1,0 +1,19 @@
+# News service: polls NSE announcements + BusinessLine RSS every 3 min, 24/7 (news arrives outside
+# market hours too), classifies (NSE by local rules, BusinessLine by Gemini) and raises news alerts.
+[Unit]
+Description=newsalert news ingest + classification
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/newsalert
+ExecStart=/home/ubuntu/newsalert/.venv/bin/python -m newsalert news
+Restart=always
+RestartSec=30
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

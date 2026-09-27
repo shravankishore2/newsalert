@@ -46,17 +46,25 @@ export default function StatusBar({ me, status, conn }: { me: Me; status: Status
       detail={t.auto_refresh ? 'Auto-refresh via TOTP' : 'Pasted token: no auto-refresh'} />
   } else token = <Cell label="Dhan token" dot="bad" value={t.state === 'error' ? 'Error' : 'Missing'} detail={t.error ?? undefined} />
 
-  // feeds
-  const f = status?.feeds?.value
+  // news service
+  const nv = status?.news?.value
   let feeds
-  if (!f || Object.keys(f).length === 0) feeds = <Cell label="News feeds" dot="idle" value="Not checked yet" />
-  else if (f._note) feeds = <Cell label="News feeds" dot="idle" value="Not used" detail={f._note.note} />
+  if (!nv) feeds = <Cell label="News" dot="idle" value="Service not seen yet" detail="Start `newsalert news`" />
+  else if (nv.replay) feeds = <Cell label="News (replayed)" dot="idle"
+    value={`${status?.replay?.value?.news_archive?.emitted ?? 0} of ${nv.archived_alerts ?? 0} archived`} detail={nv.note} />
   else {
-    const entries = Object.entries(f)
-    const bad = entries.filter(([, v]) => !v.ok)
-    feeds = <Cell label="News feeds" dot={bad.length ? (bad.length === entries.length ? 'bad' : 'warn') : 'good'}
-      value={bad.length ? `${bad.length} of ${entries.length} failing` : `${entries.length} healthy`}
-      detail={bad.length ? bad.map(([k, v]) => `${k}: ${v.error}`).join('; ') : entries.map(([k]) => k).join(', ')} />
+    const entries = Object.entries(nv.feeds ?? {})
+    const bad = entries.filter(([, v]) => v.ok === false)
+    const g = nv.gemini
+    const gem = !nv.gemini_configured ? 'Gemini key not set: BusinessLine pending'
+      : g?.paused_until ? `Gemini paused (quota) until ${fmtTime(g.paused_until, tz)}`
+        : g ? `Gemini ${g.used_today}/${g.daily_cap} requests today` : ''
+    const stale = nv.last_poll_at ? now - nv.last_poll_at > 900 : true
+    feeds = <Cell label="News" dot={bad.length || stale || nv.last_error ? 'warn' : !nv.gemini_configured ? 'warn' : 'good'}
+      value={nv.last_poll_at ? `Polled ${ago(now - nv.last_poll_at)}` : 'Not polled yet'}
+      detail={[bad.length ? `${bad.length}/${entries.length} feeds failing` : `${entries.length} feeds ok`,
+        `${nv.alerts_today ?? 0} alerts today`, nv.pending ? `${nv.pending} pending` : '', gem,
+        nv.last_error ? `error: ${nv.last_error}` : ''].filter(Boolean).join(' · ')} />
   }
 
   const push = <Cell label="Push channel" dot={conn === 'open' ? 'good' : 'warn'}

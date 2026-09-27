@@ -1,12 +1,20 @@
 # News Monitor (NSE)
 
-Async market monitoring and news alerts for the Nifty 500. Every minute during the NSE
-session it pulls last traded prices for all 500 stocks plus NIFTY 50 in one batched
-DhanHQ request. It runs a threshold + moving-average + index-correlation alert filter,
-stores every alert in SQLite with matching NSE announcements and BusinessLine headlines,
-and shows them on a password-protected web dashboard that updates live. A replay mode
-runs the same logic over Dhan 1-minute history and writes [`docs/RESULTS.md`](docs/RESULTS.md).
-A demo mode drives the whole dashboard from replayed data, with no credentials needed.
+News-first market alerts for the Nifty 500.
+
+- **News drives alerts.** A 24/7 service reads NSE corporate announcements and
+  BusinessLine RSS, classifies each item (event type, affected stocks, expected
+  direction and reason), and raises a news alert that is pushed live to a
+  password-protected dashboard.
+- **Prices evaluate the news.** Every minute during the NSE session, one batched DhanHQ
+  request fetches all 500 stocks plus NIFTY 50. An event study scores each news alert's
+  calls against NIFTY-relative returns.
+- **Price-move alerts are a secondary layer.** The threshold + moving-average +
+  index-correlation filter still runs. A price move within 60 minutes after a news alert
+  on the same stock is linked to that alert.
+- **Replay and demo.** Replay mode measures the price logic over Dhan 1-minute history.
+  Demo mode replays archived news and prices together.
+  Results are in [`docs/RESULTS.md`](docs/RESULTS.md).
 
 The original US version (Finnhub, S&P 500) is the first commit, `3a097e7`. Its measured
 results are kept in `docs/RESULTS.md`.
@@ -29,6 +37,7 @@ cp .env.example .env   # then fill in the values below
 | `DHAN_TOTP_SECRET` | The base32 secret shown when you enable TOTP in Dhan (the text form of the QR code) |
 | `DHAN_ACCESS_TOKEN` | *Alternative* to PIN + TOTP: a token from web.dhan.co. Used until it expires (24 h) and not refreshed automatically |
 | `DASHBOARD_PASSWORD` | Dashboard login (single user). Required for `serve`; `demo` generates and prints one if unset |
+| `GEMINI_API_KEY` | Classifies BusinessLine headlines (aistudio.google.com/apikey). Without it, BusinessLine items stay pending; NSE filings are still classified by rules |
 
 Dhan account prerequisites:
 
@@ -46,6 +55,8 @@ Dhan account prerequisites:
 .venv/bin/python -m newsalert smoke-test               # token, LTP, 1-min history, feeds
 .venv/bin/python -m newsalert live --tickers RELIANCE,TCS,INFY --minutes 30   # small live run
 .venv/bin/python -m newsalert live                     # all 500; sleeps outside market hours
+.venv/bin/python -m newsalert news                     # 24/7 news ingest + classification + news alerts
+.venv/bin/python -m newsalert evaluate-news            # event study; updates the news section of RESULTS.md
 .venv/bin/python -m newsalert serve                    # dashboard for live mode (run beside `live`)
 .venv/bin/python -m newsalert fetch-history            # 90 days of 1-min bars from Dhan
 .venv/bin/python -m newsalert replay                   # updates the NSE section of docs/RESULTS.md
@@ -62,20 +73,36 @@ status there. It listens on `127.0.0.1:8000` (`dashboard.host`/`port` in `config
 
 What it shows:
 
-- **Alert feed.** Ticker, company, sector, direction (▲/▼ with a label, never colour
-  alone), move %, time, and *why the alert passed* each filter: the fast/slow SMA and
-  how far the fast SMA moved, and the correlation, beta and index-adjusted move. New
-  alerts appear at the top without a refresh.
-- **Filters and search.** Ticker (with autocomplete), sector, direction, and a text
-  search over past alerts (ticker, company name, news headlines), with "load older".
+- **News alerts lead the feed.** Each card shows:
+  - The event type, the source, and the headline. NSE filings show a derived label,
+    since NSE's text isn't stored.
+  - The affected stocks, each with ▲/▼ plus the words up/down, its relation (direct,
+    competitor, supplier, customer, sector peer), strength, and a one-line reason.
+  - Classification confidence, and how long after publication we alerted.
+  - Any linked price moves.
+- **Layers.** A switch shows **News**, **News + price moves** (interleaved, with price
+  moves as a secondary card) or **Price moves** only. Filters cover ticker, sector,
+  direction, event type, and search over headlines, tickers and company names. The
+  switch remembers your choice.
+- **News detail.**
+  - The headline, with a link to the publisher or the NSE filing.
+  - Who classified it (Gemini or rules), with confidence, and each affected stock's
+    reason.
+  - Once the session has closed, the event-study returns vs NIFTY 50 (+15 min, +1 h,
+    close) and whether each call hit.
+  - Linked price moves, and a chart of the first stock vs NIFTY 50 around the alert.
+- **Price-move alerts.** Ticker, direction, move %, and *why the alert passed* each
+  filter (the SMAs, correlation, beta and index-adjusted move), with a link to the news
+  alert it followed, if any.
 - **Alert detail.** The move, the price, NIFTY 50 over the same window, the filter
   reasons in plain language, and a chart of the stock and NIFTY 50 from an hour before
   the reference price. The chart shows % change on one shared axis, with a hover
   tooltip and a data-table view. Matching news shows **headline, source and link only**.
   Article text is never stored or shown, and links open on the publisher's site.
 - **Status bar.** Market open/closed (next open when closed), the last price cycle and
-  how many prices it got, Dhan token state and time left, news feed health (checked
-  every 15 min during market hours, and on every alert), and the push connection.
+  how many prices it got, Dhan token state and time left, the news service (last poll,
+  feed health, alerts today, items waiting, and Gemini's requests used or paused), and
+  the push connection.
 - **Results page.** The false-alert tiles (rate, 95% CI, n) parsed from
   `docs/RESULTS.md`, with each market's full section rendered below.
 
@@ -96,8 +123,15 @@ What it shows:
     stays on every page.
   - A REPLAY tag sits in the header.
   - Times say "(replayed)", and the status bar shows the token and news as "Not used".
-- Replayed data has no archived news, so demo alerts have no news items, and the UI says
-  so rather than showing invented headlines.
+- **News:** with the NSE dataset, demo replays **archived news alerts together with
+  prices**. The archive is the news service's store in `data/alerts.db`.
+  - It replays only days where both exist, plus one warm-up day before.
+  - Each news alert appears when the replay clock reaches its original alert time. News
+    from outside market hours appears at the next replayed open.
+  - Replayed price moves link to it exactly as in live mode.
+  - Days without archived news replay prices only, and the status bar says so.
+  - The NSE announcements feed empties at midnight IST, so the archive starts on the
+    day the news service first runs; nothing earlier can be recovered.
 - **Datasets** (`demo.datasets` in `config.yaml`):
   - `nse` uses `data/history.db` from `fetch-history`.
   - `us` uses the US build's 19 days of Yahoo bars in `data/history_us.db`. That file is
@@ -148,6 +182,53 @@ npm --prefix web run dev     # Vite on :5173, proxies /api to the Python server 
 npm --prefix web run lint
 ```
 
+## News pipeline
+
+`newsalert news` runs 24/7 as `newsalert-news.service`:
+
+1. **Ingest.** It polls each feed every 3 minutes with conditional GET (ETag /
+   If-Modified-Since), so an unchanged feed costs one small `304`. Every item is stored
+   once, with source, link, published time and fetched time.
+   - **BusinessLine:** the headline and the RSS summary. Never article text.
+   - **NSE:** only the link, the symbol (taken from the filing link), a derived label
+     and the times, because NSE's terms forbid storing its content.
+   - Items already older than 2 hours when first seen are archived but don't alert and
+     aren't sent to Gemini. Otherwise the first poll would flood alerts with stale news.
+2. **Classify.** Each item gets an event type from a fixed list: results, guidance,
+   merger/acquisition, order/contract win, rating change, regulatory action,
+   fraud/legal, management change, capital raise, dividend/buyback, other. It also gets
+   its affected stocks (ticker, relation, direction, strength, reason) and an overall
+   confidence.
+   - **NSE filings: local rules, no LLM.** The filing subject maps to an event type,
+     and the only affected stock is the announcing company. A direction is given only
+     where the event implies one (for example, fraud/default → down, order win → up,
+     rating downgrade → down); otherwise it's left unknown. Confidence is fixed at 0.5.
+     Trading-window, AGM and other routine filings are "other" and don't alert.
+   - **BusinessLine: Gemini** (`gemini-3.5-flash-lite`, structured JSON output).
+     - **Validation:** Pydantic checks every reply; tickers not in `tickers.csv` are
+       dropped and recorded.
+     - **Invalid JSON:** retried once for that item alone; after that the item is
+       stored as `unclassified`.
+     - **No double classification:** results are cached by headline+summary hash.
+   - **Free-tier limits:** Google no longer publishes them (they're per project, in AI
+     Studio). The service stays inside conservative caps: 5 requests/min, 100 per
+     Pacific-time day (when Google resets) and 10 headlines per request. On an HTTP 429
+     it pauses for Google's `retryDelay`; the quota Google reports shows in the status
+     bar.
+3. **Alert.** A classified item whose event type isn't "other" and which has at least
+   one affected stock in the universe becomes a **news alert**, pushed to the dashboard
+   over SSE (`event: news`). The live monitor links any price-move alert on that stock
+   in the next 60 minutes.
+4. **Evaluate.** `newsalert evaluate-news` runs at 15:50 IST on weekdays
+   (`newsalert-evaluate.timer`). The method is in RESULTS.md:
+   - **Start:** each affected stock's return vs NIFTY 50 is measured from the alert
+     time, or from the next open for news outside market hours.
+   - **Horizons:** +15 min, +1 h and the close, using the live 60-second LTP samples.
+   - **Scoring:** hit rates by event type and by relation (direct vs second-order),
+     against a random-direction baseline of 50% (exact binomial test, Wilson 95% CI).
+   - **Latency:** publication to alert.
+   - **Small samples:** groups under 30 are marked too few.
+
 ## Deployment (Oracle Cloud VM)
 
 The production setup is an Ubuntu 24.04 VM with 1 GB RAM plus a 2 GB swap file. The
@@ -157,6 +238,8 @@ files are in [`deploy/`](deploy/).
 |---|---|
 | `newsalert-live.timer` | Fires at **09:10 IST, Monday–Friday** (`Persistent=true`, so a missed start runs at boot) |
 | `newsalert-live.service` | `ExecCondition=is-trading-window --until 15:35` skips NSE holidays and late starts without marking a failure. `ExecStartPre=token` makes sure the Dhan token lasts the session. `live --until 15:35` stops the monitor, with `RuntimeMaxSec=6h30min` as a backstop |
+| `newsalert-news.service` | Always on: news ingest, classification and news alerts (see *News pipeline*) |
+| `newsalert-evaluate.timer` | 15:50 IST on weekdays: event study, rewrites the news section of `docs/RESULTS.md` |
 | `newsalert-web.service` | Always-on dashboard over live data, on `127.0.0.1:8000` |
 | `newsalert-demo.service` | Always-on demo (replayed NSE bars, labelled as replay) on `127.0.0.1:8001` |
 | Caddy (`deploy/Caddyfile`) | HTTPS through Let's Encrypt. The live dashboard is at `https://<ip-with-dashes>.sslip.io`, the demo at `https://demo.<ip-with-dashes>.sslip.io`. sslip.io resolves those names to the IP, so no DNS is needed. SSE is streamed unbuffered (`flush_interval -1`) |
@@ -171,8 +254,9 @@ Setup outline, in the order used:
 5. Open ports 80/443 in iptables (inserted before Oracle's default REJECT rule, then
    `netfilter-persistent save`) **and** in the Oracle VCN security list; the console
    step is below.
-6. Install the units, run `systemctl enable --now newsalert-web newsalert-live.timer
-   newsalert-demo`, and install the Caddyfile with the host filled in.
+6. Install the units, run `systemctl enable --now newsalert-web newsalert-news
+   newsalert-live.timer newsalert-evaluate.timer newsalert-demo`, and install the
+   Caddyfile with the host filled in.
 
 **Oracle console step.** The VM's firewall isn't enough; Oracle also filters at the
 subnet. Go to Networking → Virtual Cloud Networks → your VCN → the instance's subnet →
@@ -186,7 +270,7 @@ Operations:
 systemctl list-timers newsalert-live.timer            # next run
 journalctl -u newsalert-live -f                       # today's session
 .venv/bin/python -m newsalert is-trading-window       # would today's run start?
-cd ~/newsalert && git pull && .venv/bin/pip install -e . && npm --prefix web ci && npm --prefix web run build && sudo systemctl restart newsalert-web newsalert-demo
+cd ~/newsalert && git pull --rebase --autostash && .venv/bin/pip install -e . && npm --prefix web ci && npm --prefix web run build && sudo systemctl restart newsalert-web newsalert-news newsalert-demo
 ```
 
 ### Can a password-protected demo show Dhan data?
@@ -252,7 +336,8 @@ config.yaml / .env / tickers.csv
 | `web/` | React + Vite frontend (feed, detail, status bar, results) |
 | `newsalert/auth.py` | TOTP (RFC 6238), Dhan token generation, private token cache, log redaction |
 | `newsalert/market.py` | NSE calendar: IST session, weekends, trading holidays |
-| `newsalert/clients.py` | Dhan (LTP, intraday), RSS feeds and news matching. All take an injected `httpx.AsyncClient` |
+| `newsalert/clients.py` | Dhan (LTP, intraday) and an RSS reader for the smoke test. All take an injected `httpx.AsyncClient` |
+| `newsalert/news/` | News-first pipeline: `ingest.py` (feeds, storage, alerts), `rules.py` (NSE rule classifier), `gemini.py` (BusinessLine classifier, quota), `models.py` (Pydantic schemas), `evaluate.py` (event study, RESULTS section) |
 | `newsalert/history.py` | Dhan 1-minute history download with ≤90-day windows and a timestamp sanity check |
 | `newsalert/replay.py` | Replay, false-alert classification, latency percentiles, per-market RESULTS sections |
 | `newsalert/universe.py` | Nifty 500 CSV + Dhan scrip master → `tickers.csv` |
@@ -338,10 +423,9 @@ What this means for the design:
 
 ## News sources
 
-News is fetched when an alert fires, plus a health check at most every 15 minutes during
-market hours. Each feed is fetched at most once per 5 minutes, with a
-`newsalert/0.2 (personal, non-commercial)` User-Agent. Only headline, source, link and
-time are kept, and they're shown only on your password-protected dashboard.
+The news service polls each feed every 3 minutes, around the clock, using conditional
+GET so unchanged feeds cost a `304`. It sends a `newsalert/0.3 (personal, non-commercial)`
+User-Agent. Results are shown only on your password-protected dashboard.
 
 Terms reviewed **2026-09-27**. robots.txt allows every feed URL below for a generic bot,
 but the terms of use are stricter, so they decided the selection:
@@ -355,13 +439,27 @@ but the terms of use are stricter, so they decided the selection:
 | Mint (livemint.com) | No | Terms cover RSS feeds: "you must not use robots, spiders, crawlers, scrapers … Automated scraping/crawling/bulk downloading is prohibited." **Forbids automated access.** |
 | Moneycontrol | No | Terms page (`moneycontrol.com/terms-use/`) returned HTTP 503 (bot wall) and couldn't be read. Left out rather than assumed. |
 
-News matching: NSE items carry the NSE symbol in their link (`/corporate/SYMBOL_…`), so
-they match exactly. BusinessLine headlines match on the company name with legal suffixes
-removed ("Reliance Industries Ltd." → "Reliance Industries"), on word boundaries.
+### Sending news to an LLM (reviewed 2026-09-28)
+
+| Source | Sent to Gemini? | Stored | Why |
+|---|---|---|---|
+| NSE announcements | **No**, local rules only | Link, symbol, derived label, times; **none of NSE's text** | NSE's terms: content "shall not be copied, modified… uploaded, transmitted, posted, stored (either in hardcopy or in an electronic retrieval system)… without prior written permission of NSE." Sending it to an LLM is uploading and transmitting it, and keeping its text is storing it. The owner chose rules-only on 2026-09-28. |
+| BusinessLine | **Yes**, headline + RSS summary, on the **free tier** | Headline, RSS summary, link, times | Its terms prohibit "transmitting… or using any Content… for **commercial or public** purposes" and allow RSS "for personal and non-commercial use". A personal classifier fits that. However, on Gemini's free tier **Google uses submitted content "to provide, improve, and develop Google products and services" and human reviewers may read it**; the paid tier doesn't. The owner chose the free tier anyway on 2026-09-28, accepting that trade-off. To change it, enable billing on the key's Google Cloud project, and the paid-tier data terms then apply. |
+
+NSE items carry the NSE symbol in their filing link (`/corporate/SYMBOL_…`), so the
+announcing company is identified exactly. BusinessLine items name their stocks through
+Gemini, restricted to `tickers.csv`.
 
 ## Results
 
 See [`docs/RESULTS.md`](docs/RESULTS.md).
+
+**News-driven alerts:** no measurements yet. The news archive starts when the news
+service first runs (2026-09-28), and the event study needs sessions with news alerts and
+live prices behind them. RESULTS.md is rewritten after each session, marks groups under
+30 calls as too few, and reports only what the data shows.
+
+**Price-move alerts** (replay):
 
 Both markets use the same false-alert definition (price gives back more than half the
 move within 30 minutes) and the same filter settings; nothing was retuned for NSE.

@@ -5,6 +5,8 @@ type Pt = [number, number]
 type Props = {
   symbol: string; indexName: string; prices: Pt[]; index: Pt[]
   refTs: number; alertTs: number; start: number; end: number; tz: string; currency: string
+  markers?: { ts: number; label: string }[]   // default: Reference + Alert
+  baseLabel?: string                           // what the % change is measured from
 }
 
 // The SVG is drawn at the container's real pixel width so text stays readable on phones
@@ -96,7 +98,7 @@ export default function PriceChart(p: Props) {
       <div className="chart-legend">
         <span><span className="swatch" style={{ background: 'var(--series-1)' }} />{p.symbol}</span>
         <span><span className="swatch" style={{ background: 'var(--series-2)' }} />{p.indexName}</span>
-        <span className="muted">% change since the reference price ({fmtTime(p.refTs, p.tz)} {tzAbbr(p.tz)})</span>
+        <span className="muted">% change since {p.baseLabel ?? 'the reference price'} ({fmtTime(p.refTs, p.tz)} {tzAbbr(p.tz)})</span>
         <span className="spacer" />
         <button className="linkish" onClick={() => setTable((v) => !v)}>{table ? 'Hide data table' : 'Show data table'}</button>
       </div>
@@ -114,7 +116,8 @@ export default function PriceChart(p: Props) {
             <text key={t} className="axis-label" x={X(t)} y={H - 8} textAnchor="middle">{fmtTime(t, p.tz)}</text>
           ))}
           {/* reference label sits left of its line, alert label right: they can't collide */}
-          {([[p.refTs, 'Reference', 'end', -4], [p.alertTs, 'Alert', 'start', 4]] as const).map(([t, label, anchor, dx]) => (
+          {(p.markers ? p.markers.map((m) => [m.ts, m.label, 'start', 4] as const)
+            : ([[p.refTs, 'Reference', 'end', -4], [p.alertTs, 'Alert', 'start', 4]] as const)).map(([t, label, anchor, dx]) => (
             <g key={label}>
               <line className="marker" x1={X(t)} x2={X(t)} y1={M.top} y2={H - M.bottom} />
               <text className="marker-label" x={X(t) + dx} y={M.top + 10} textAnchor={anchor}>{label}</text>

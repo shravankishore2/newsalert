@@ -92,14 +92,66 @@ def _explain(row: dict, p: dict) -> dict:
     return out
 
 
-def _alert_json(row: sqlite3.Row, info: SiteInfo) -> dict:
+def _linked_news(conn: sqlite3.Connection, alert_ids: list[int]) -> dict[int, list]:
+    if not alert_ids or not _has_news_tables(conn):
+        return {}
+    qs = ",".join("?" * len(alert_ids))
+    out: dict[int, list] = {}
+    for l in conn.execute(f"""SELECT l.price_alert_id, l.minutes_after, n.id, n.event_type, n.headline, n.source
+                              FROM price_news_links l JOIN news_alerts n ON n.id = l.news_alert_id
+                              WHERE l.price_alert_id IN ({qs})""", alert_ids):
+        out.setdefault(l[0], []).append({"news_alert_id": l[2], "event_type": l[3], "headline": l[4],
+                                         "source": l[5], "minutes_after": l[1]})
+    return out
+
+
+def _alert_json(row: sqlite3.Row, info: SiteInfo, linked: dict[int, list] | None = None) -> dict:
     r = dict(row)
+    r["linked_news"] = (linked or {}).get(r["id"], [])
     news = json.loads(r.pop("news") or "[]")
     t = info.tickers.get(r["symbol"], {})
     r.update(name=t.get("name", ""), sector=t.get("sector", ""),
              news=[{k: n.get(k) for k in ("headline", "source", "url", "published")} for n in news],
              reasons=_explain(r, info.params))
     return r
+
+
+NEWS_COLS = ("id, mode, created_at, published_at, source, event_type, confidence, headline, url, classifier")
+STOCK_COLS = ("news_alert_id, ticker, relation, direction, strength, reason, t0, t0_rule, "
+              "abn_15m, abn_1h, abn_close, ret_15m, ret_1h, ret_close, evaluated_at, eval_note")
+
+
+def _news_json(conn: sqlite3.Connection, rows: list[sqlite3.Row], info: SiteInfo) -> list[dict]:
+    """News alerts with their affected stocks and linked price alerts (headline/source/link only)."""
+    if not rows:
+        return []
+    ids = [r["id"] for r in rows]
+    qs = ",".join("?" * len(ids))
+    stocks: dict[int, list] = {}
+    for s in conn.execute(f"SELECT {STOCK_COLS} FROM news_alert_stocks WHERE news_alert_id IN ({qs}) ORDER BY id", ids):
+        d = dict(s)
+        t = info.tickers.get(d["ticker"], {})
+        d.update(name=t.get("name", ""), sector=t.get("sector", ""))
+        stocks.setdefault(d.pop("news_alert_id"), []).append(d)
+    links: dict[int, list] = {}
+    for l in conn.execute(f"""SELECT l.news_alert_id, l.price_alert_id, l.minutes_after, a.symbol, a.move, a.ts, a.direction
+                              FROM price_news_links l JOIN alerts a ON a.id = l.price_alert_id
+                              WHERE l.news_alert_id IN ({qs}) ORDER BY a.ts""", ids):
+        links.setdefault(l["news_alert_id"], []).append(
+            {"id": l["price_alert_id"], "symbol": l["symbol"], "move": l["move"], "ts": l["ts"],
+             "direction": l["direction"], "minutes_after": l["minutes_after"]})
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["stocks"] = stocks.get(d["id"], [])
+        d["linked_price_alerts"] = links.get(d["id"], [])
+        d["latency_s"] = (d["created_at"] - d["published_at"]) if d["published_at"] else None
+        out.append(d)
+    return out
+
+
+def _has_news_tables(conn: sqlite3.Connection) -> bool:
+    return conn.execute("SELECT 1 FROM sqlite_master WHERE name='news_alerts'").fetchone() is not None
 
 
 def parse_results(text: str) -> list[dict]:
@@ -199,7 +251,10 @@ def create_app(*, db_path: str, info: SiteInfo, password: str, prices: PriceSour
         return {"mode": info.mode, "dataset": info.dataset, "index_name": info.index_name,
                 "currency": info.currency, "timezone": info.timezone, "params": info.params,
                 "sectors": sorted({t["sector"] for t in info.tickers.values() if t.get("sector")}),
-                "symbols": sorted(info.tickers)}
+                "symbols": sorted(info.tickers),
+                "event_types": ["results", "guidance", "merger/acquisition", "order/contract win", "rating change",
+                                "regulatory action", "fraud/legal", "management change", "capital raise",
+                                "dividend/buyback"]}
 
     @app.get("/api/alerts")
     async def alerts(request: Request, symbol: str = "", sector: str = "", direction: str = "",
@@ -233,7 +288,8 @@ def create_app(*, db_path: str, info: SiteInfo, password: str, prices: PriceSour
         with db() as conn:
             rows = conn.execute(f"SELECT {ALERT_COLS} FROM alerts WHERE {' AND '.join(where)} "
                                 f"ORDER BY id DESC LIMIT ?", (*args, limit + 1)).fetchall()
-        items = [_alert_json(r, info) for r in rows[:limit]]
+            linked = _linked_news(conn, [r["id"] for r in rows[:limit]])
+        items = [_alert_json(r, info, linked) for r in rows[:limit]]
         return {"items": items, "more": len(rows) > limit}
 
     @app.get("/api/alerts/{alert_id}")
@@ -241,14 +297,79 @@ def create_app(*, db_path: str, info: SiteInfo, password: str, prices: PriceSour
         authed(request)
         with db() as conn:
             row = conn.execute(f"SELECT {ALERT_COLS} FROM alerts WHERE id = ?", (alert_id,)).fetchone()
+            linked = _linked_news(conn, [alert_id]) if row else {}
         if row is None:
             raise HTTPException(404, "no such alert")
-        a = _alert_json(row, info)
+        a = _alert_json(row, info, linked)
         now_ts = market().get("now_ts") or clock()
         start, end = a["ref_ts"] - 60 * context_min, min(a["ts"] + 60 * context_min, int(now_ts))
         a["context"] = {"start": start, "end": end, "prices": prices(a["symbol"], start, end),
                         "index": prices(info.index_symbol, start, end)}
         return a
+
+    @app.get("/api/news")
+    async def news_list(request: Request, symbol: str = "", sector: str = "", direction: str = "",
+                        event_type: str = "", q: str = "", before_id: int | None = None, limit: int = 50) -> dict:
+        authed(request)
+        where, args = ["1=1"], []
+        stock_conds, stock_args = [], []
+        if symbol:
+            stock_conds.append("s.ticker = ?")
+            stock_args.append(symbol.upper())
+        if sector:
+            syms = [t for t, v in info.tickers.items() if v.get("sector") == sector]
+            stock_conds.append(f"s.ticker IN ({','.join('?' * len(syms)) or 'NULL'})")
+            stock_args += syms
+        if direction in ("up", "down"):
+            stock_conds.append("s.direction = ?")
+            stock_args.append(direction)
+        if stock_conds:
+            where.append(f"n.id IN (SELECT s.news_alert_id FROM news_alert_stocks s WHERE {' AND '.join(stock_conds)})")
+            args += stock_args
+        if event_type:
+            where.append("n.event_type = ?")
+            args.append(event_type)
+        if q:
+            ql = q.strip().lower()
+            hits = [t for t, v in info.tickers.items() if ql in v.get("name", "").lower() or ql == t.lower()]
+            clause = "LOWER(COALESCE(n.headline, '')) LIKE ?"
+            qargs = [f"%{ql}%"]
+            if hits:
+                clause = (f"({clause} OR n.id IN (SELECT news_alert_id FROM news_alert_stocks "
+                          f"WHERE ticker IN ({','.join('?' * len(hits))})))")
+                qargs += hits
+            where.append(clause)
+            args += qargs
+        if before_id:
+            where.append("n.id < ?")
+            args.append(before_id)
+        limit = max(1, min(limit, 200))
+        with db() as conn:
+            if not _has_news_tables(conn):
+                return {"items": [], "more": False}
+            rows = conn.execute(f"SELECT {', '.join('n.' + c.strip() for c in NEWS_COLS.split(','))} FROM news_alerts n "
+                                f"WHERE {' AND '.join(where)} ORDER BY n.id DESC LIMIT ?", (*args, limit + 1)).fetchall()
+            items = _news_json(conn, rows[:limit], info)
+        return {"items": items, "more": len(rows) > limit}
+
+    @app.get("/api/news/{news_id}")
+    async def news_detail(request: Request, news_id: int) -> dict:
+        authed(request)
+        with db() as conn:
+            if not _has_news_tables(conn):
+                raise HTTPException(404, "no such news alert")
+            row = conn.execute(f"SELECT {NEWS_COLS} FROM news_alerts WHERE id = ?", (news_id,)).fetchone()
+            if row is None:
+                raise HTTPException(404, "no such news alert")
+            n = _news_json(conn, [row], info)[0]
+        if n["stocks"]:
+            now_ts = market().get("now_ts") or clock()
+            t = n["created_at"]
+            start, end = int(t - 60 * context_min), int(min(t + 2 * 60 * context_min, now_ts))
+            sym = n["stocks"][0]["ticker"]
+            n["context"] = {"symbol": sym, "start": start, "end": end, "marker": t,
+                            "prices": prices(sym, start, end), "index": prices(info.index_symbol, start, end)}
+        return n
 
     def status_payload() -> dict:
         st = {}
@@ -259,7 +380,7 @@ def create_app(*, db_path: str, info: SiteInfo, password: str, prices: PriceSour
         return {"mode": info.mode, "dataset": info.dataset, "market": market(),
                 "cycle": st.get("cycle"), "feeds": st.get("feeds"),
                 "token": st.get("token") or (token_fallback() if token_fallback else None),
-                "replay": st.get("replay"), "server_time": clock()}
+                "replay": st.get("replay"), "news": st.get("news"), "server_time": clock()}
 
     @app.get("/api/status")
     async def status(request: Request) -> dict:
@@ -273,24 +394,34 @@ def create_app(*, db_path: str, info: SiteInfo, password: str, prices: PriceSour
         return {"sections": parse_results(p.read_text()) if p.exists() else []}
 
     # -- push channel -------------------------------------------------------------------
-    def _max_id() -> int:
+    def _max_ids() -> tuple[int, int]:
         if not Path(db_path).exists():
-            return 0
+            return 0, 0
         with _connect(db_path) as conn:
-            return conn.execute("SELECT COALESCE(MAX(id), 0) FROM alerts").fetchone()[0]
+            p = conn.execute("SELECT COALESCE(MAX(id), 0) FROM alerts").fetchone()[0]
+            n = conn.execute("SELECT COALESCE(MAX(id), 0) FROM news_alerts").fetchone()[0] if _has_news_tables(conn) else 0
+        return n, p
 
-    def _new_alerts(after: int) -> list[dict]:
+    def _new_since(news_after: int, price_after: int) -> tuple[list[dict], list[dict]]:
         if not Path(db_path).exists():
-            return []
+            return [], []
         with _connect(db_path) as conn:
+            news = []
+            if _has_news_tables(conn):
+                rows = conn.execute(f"SELECT {NEWS_COLS} FROM news_alerts WHERE id > ? ORDER BY id LIMIT 100",
+                                    (news_after,)).fetchall()
+                news = _news_json(conn, rows, info)
             rows = conn.execute(f"SELECT {ALERT_COLS} FROM alerts WHERE variant='filtered' AND id > ? "
-                                f"ORDER BY id LIMIT 100", (after,)).fetchall()
-        return [_alert_json(r, info) for r in rows]
+                                f"ORDER BY id LIMIT 100", (price_after,)).fetchall()
+            linked = _linked_news(conn, [r["id"] for r in rows])
+            price = [_alert_json(r, info, linked) for r in rows]
+        return news, price
 
-    async def event_stream(request: Request, last_id: int, max_events: int | None):
-        """Alerts as `event: alert` (with `id:` so browsers resume via Last-Event-ID), a
-        status snapshot about every 5 s, keep-alive comments in between. `max_events`
-        (any type) ends the stream early; it exists for tests and debugging."""
+    async def event_stream(request: Request, news_last: int, price_last: int, max_events: int | None):
+        """`event: news` (news alerts, the primary feed) and `event: alert` (price moves), each with
+        `id: n<news>:p<price>` so a reconnecting browser resumes both via Last-Event-ID; a status
+        snapshot about every 5 s; keep-alive comments in between. `max_events` (any type) ends the
+        stream early; it exists for tests and debugging."""
         sent = 0
         yield "retry: 3000\n\n"
         status_every = max(1, round(5 / push_poll_s)) if push_poll_s > 0 else 5
@@ -298,9 +429,14 @@ def create_app(*, db_path: str, info: SiteInfo, password: str, prices: PriceSour
         while True:
             if await request.is_disconnected():
                 return
-            frames = [f"id: {a['id']}\nevent: alert\ndata: {json.dumps(a)}\n\n" for a in _new_alerts(last_id)]
-            if frames:
-                last_id = int(frames[-1].split("\n", 1)[0][4:])
+            news, price = _new_since(news_last, price_last)
+            frames = []
+            for n in news:
+                news_last = n["id"]
+                frames.append(f"id: n{news_last}:p{price_last}\nevent: news\ndata: {json.dumps(n)}\n\n")
+            for a in price:
+                price_last = a["id"]
+                frames.append(f"id: n{news_last}:p{price_last}\nevent: alert\ndata: {json.dumps(a)}\n\n")
             if tick % status_every == 0:
                 frames.append(f"event: status\ndata: {json.dumps(status_payload())}\n\n")
             for f in frames:
@@ -314,11 +450,21 @@ def create_app(*, db_path: str, info: SiteInfo, password: str, prices: PriceSour
             await asyncio.sleep(push_poll_s)
 
     @app.get("/api/stream")
-    async def stream(request: Request, since: int | None = None, max_events: int | None = None):
+    async def stream(request: Request, since: int | None = None, since_news: int | None = None,
+                     max_events: int | None = None):
         authed(request)
-        header = request.headers.get("last-event-id")
-        last = int(header) if header and header.isdigit() else (since if since is not None else _max_id())
-        return StreamingResponse(event_stream(request, last, max_events), media_type="text/event-stream",
+        header = request.headers.get("last-event-id") or ""
+        m = re.fullmatch(r"n(\d+):p(\d+)", header)
+        n_max, p_max = _max_ids()
+        if m:
+            news_last, price_last = int(m.group(1)), int(m.group(2))
+        elif header.isdigit():                       # older clients sent the price id alone
+            news_last, price_last = n_max, int(header)
+        else:
+            news_last = since_news if since_news is not None else n_max
+            price_last = since if since is not None else p_max
+        return StreamingResponse(event_stream(request, news_last, price_last, max_events),
+                                 media_type="text/event-stream",
                                  headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
     # -- frontend -----------------------------------------------------------------------

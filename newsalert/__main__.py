@@ -79,6 +79,42 @@ def _today_at(hhmm: str, cfg: dict) -> datetime:
     return datetime.now(tz).replace(hour=h, minute=m, second=0, microsecond=0)
 
 
+async def cmd_news(args, cfg) -> int:
+    """24/7 news service: poll feeds, classify (NSE by rules, BusinessLine by Gemini), raise news alerts."""
+    from .news.gemini import GeminiClassifier
+    from .news.ingest import Feed, NewsService
+    sec = load_secrets()
+    n, g = cfg["news"], cfg["news"]["gemini"]
+    tickers = {t.symbol: t.name for t in load_tickers(cfg["tickers_file"])}
+    store = Store(cfg["db_path"])
+    async with httpx.AsyncClient(timeout=g["timeout_s"]) as http:
+        gem = None
+        if sec.gemini_api_key:
+            gem = GeminiClassifier(http, sec.gemini_api_key, model=g["model"], tickers=tickers, store=store,
+                                   rpm=g["requests_per_minute"], rpd=g["requests_per_day"],
+                                   batch_size=g["batch_size"], base_url=g["base_url"])
+        else:
+            log.warning("GEMINI_API_KEY not set: BusinessLine items stay pending; NSE filings are still classified")
+        svc = NewsService(http=http, store=store, tickers=tickers, gemini=gem,
+                          feeds=[Feed(f["name"], f["source"], f["url"]) for f in n["feeds"]],
+                          poll_s=n["poll_s"], max_age_min=n["max_age_min"], min_confidence=n["min_confidence"])
+        await svc.run(max_polls=args.polls)
+    return 0
+
+
+def cmd_evaluate_news(args, cfg) -> int:
+    """Event study for news alerts whose session has closed; rewrites the news section of RESULTS.md."""
+    from .news.evaluate import evaluate_pending, render_news_results
+    from .replay import write_results
+    store = Store(cfg["db_path"])
+    n = evaluate_pending(store, MarketCalendar.from_config(cfg["market"]),
+                         lambda s, a, b: store.prices_between("quotes", s, a, b), cfg["index"]["symbol"])
+    write_results(args.out, "news", render_news_results(store, generated=datetime.now(timezone.utc),
+                                                        min_n=args.min_sample))
+    print(f"evaluated {n} affected-stock rows; updated news section of {args.out}")
+    return 0
+
+
 def cmd_is_trading_window(args, cfg) -> int:
     """Exit 0 if today is an NSE trading day and it's before --until; 1 otherwise.
     Used as systemd ExecCondition, where exit 1 skips the run without marking it failed."""
@@ -133,12 +169,12 @@ async def cmd_live(args, cfg) -> int:
     index = _index(cfg)
     async with httpx.AsyncClient(timeout=cfg["dhan"]["timeout_s"]) as http:
         auth = _auth(http, cfg, sec)
-        feeds = [RssFeed(http, f["name"], f["url"], cfg["news"]["cache_ttl_s"]) for f in cfg["news"]["feeds"]]
         mon = LiveMonitor(
             tickers=_tickers(cfg, args.tickers), index=index,
             engine=Engine(Params.from_config(cfg["alerts"]), index.symbol), dhan=_dhan(http, cfg, auth),
-            auth=auth, feeds=feeds, store=store, calendar=MarketCalendar.from_config(cfg["market"]),
-            cycle_s=cfg["dhan"]["cycle_s"], token_refresh_lead_min=cfg["dhan"]["token_refresh_lead_min"])
+            auth=auth, store=store, calendar=MarketCalendar.from_config(cfg["market"]),
+            cycle_s=cfg["dhan"]["cycle_s"], token_refresh_lead_min=cfg["dhan"]["token_refresh_lead_min"],
+            link_window_min=cfg["news"]["link_window_min"])
         stop = datetime.now(timezone.utc) + timedelta(minutes=args.minutes) if args.minutes else None
         if args.until:
             cut = _today_at(args.until, cfg)
@@ -289,7 +325,9 @@ def cmd_demo(args, cfg) -> int:
     driver = DemoDriver(history_db=ds["history_db"], demo_db=cfg["demo"]["db_path"], dataset=ds,
                         alerts_cfg=cfg["alerts"], speed=args.speed or cfg["demo"]["speed"],
                         warm_days=cfg["demo"]["warm_days"] if args.warm_days is None else args.warm_days,
-                        session=_nse_session(cfg) if name == "nse" else None)
+                        session=_nse_session(cfg) if name == "nse" else None,
+                        news_db=cfg["db_path"] if name == "nse" else None,
+                        link_window_min=cfg["news"]["link_window_min"])
     info = SiteInfo(mode="demo", dataset=ds["label"], index_name=ds["index_name"], index_symbol=ds["index_symbol"],
                     currency=ds["currency"], timezone=ds["timezone"],
                     tickers=_ticker_info(ds["tickers_file"], ds["sector_column"]), params=_alert_params(cfg))
@@ -391,6 +429,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--cycles", type=int, help="stop after N polling cycles")
     p.add_argument("--minutes", type=float, help="stop after N minutes")
     p.add_argument("--until", help="stop at this time today, market timezone (e.g. 15:35)")
+    p = sub.add_parser("news", help="24/7 news service: ingest, classify, raise news alerts")
+    p.add_argument("--polls", type=int, help="stop after N polls (default: run forever)")
+    p = sub.add_parser("evaluate-news", help="event study for news alerts; updates docs/RESULTS.md")
+    p.add_argument("--out", default="docs/RESULTS.md")
+    p.add_argument("--min-sample", type=int, default=30)
     p = sub.add_parser("is-trading-window", help="exit 0 on an NSE trading day before --until (for systemd)")
     p.add_argument("--until", default="15:35")
     p = sub.add_parser("serve", help="dashboard over live data (run `live` alongside)")
@@ -425,11 +468,13 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_replay(args, cfg)
     if args.cmd == "is-trading-window":
         return cmd_is_trading_window(args, cfg)
+    if args.cmd == "evaluate-news":
+        return cmd_evaluate_news(args, cfg)
     if args.cmd == "serve":
         return cmd_serve(args, cfg)
     if args.cmd == "demo":
         return cmd_demo(args, cfg)
-    handler = {"token": cmd_token, "live": cmd_live, "smoke-test": cmd_smoke_test,
+    handler = {"token": cmd_token, "live": cmd_live, "smoke-test": cmd_smoke_test, "news": cmd_news,
                "fetch-history": cmd_fetch_history}[args.cmd]
     return asyncio.run(handler(args, cfg))
 

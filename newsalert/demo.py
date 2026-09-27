@@ -2,6 +2,11 @@
 writing alerts and status to a demo database exactly as live mode would. The dashboard
 reads it like live data but labels everything as replay.
 
+With a news archive (the live alerts.db), archived news alerts are replayed together with
+prices, only on days where both exist (plus one warm-up day before). Each news alert
+appears when the replay clock reaches its original alert time (news from outside market
+hours appears at the next replayed open), and price alerts link to it as in live mode.
+
 No credentials or market hours needed. Replayed data has no archived news, so demo
 alerts have no news items (the UI says so rather than showing made-up headlines).
 """
@@ -28,6 +33,7 @@ MAX_GAP_SLEEP_S = 3.0   # overnight/weekend gaps are compressed to at most this 
 class DemoDriver:
     def __init__(self, *, history_db: str, demo_db: str, dataset: dict, alerts_cfg: dict,
                  speed: float = 60, warm_days: int = 1, session: tuple[int, int, int] | None = None,
+                 news_db: str | None = None, link_window_min: float = 60,
                  sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
                  clock: Callable[[], float] = time.time):
         self.history = Store(history_db)
@@ -47,13 +53,31 @@ class DemoDriver:
         self.total_minutes = self.history.conn.execute("SELECT COUNT(DISTINCT ts) FROM bars").fetchone()[0]
         self.alerts = 0
         self.finished = False
+        self.link_window_s = link_window_min * 60
+        self.news: list[dict] = self._load_news(news_db) if news_db else []
+        self.news_emitted = 0
+        self.days: set | None = None          # replay only these dates (None = all)
+        if self.news:
+            bar_days = sorted({datetime.fromtimestamp(t, self.tz).date() for (t,) in self.history.conn.execute(
+                "SELECT DISTINCT ts FROM bars WHERE symbol = ?", (self.index,))})
+            news_days = {datetime.fromtimestamp(n["created_at"], self.tz).date() for n in self.news}
+            both = sorted(d for d in bar_days if d in news_days)
+            if both:
+                warm = [d for d in bar_days if d < both[0]][-1:]
+                self.days = set(both) | set(warm)
+                self.warm_days = len(warm)
+                self.total_minutes = sum(1 for _ in self._minutes(count_only=True))
+            self.news = [n for n in self.news if self.days is None or
+                         datetime.fromtimestamp(n["created_at"], self.tz).date() >= min(self.days)]
 
     def _publish(self, n_prices: int = 0, n_alerts: int = 0) -> None:
         now = self.clock()
         self.out.set_status("replay", {
             "dataset": self.dataset["label"], "sim_ts": self.sim_ts, "market_open": self.market_open,
             "speed": self.speed, "minutes_done": self.minutes_done, "total_minutes": self.total_minutes,
-            "alerts": self.alerts, "finished": self.finished}, now=now)
+            "alerts": self.alerts, "finished": self.finished,
+            "news_archive": {"alerts": len(self.news), "emitted": self.news_emitted,
+                             "days": sorted(str(d) for d in self.days) if self.days else []}}, now=now)
         if n_prices:
             self.out.set_status("cycle", {"at": now, "sim_ts": self.sim_ts, "ok": n_prices, "failed": 0,
                                           "alerts": n_alerts, "error": None, "missing": []}, now=now)
@@ -67,14 +91,56 @@ class DemoDriver:
                 continue
             alert_id = self.out.insert_alert(a, mode="demo", run_id=self.run_id, variant="filtered",
                                              received_ns=received, sent_ns=time.perf_counter_ns(), delivered=True)
-            self.out.set_alert_news(alert_id, [])
+            self.out.link_price_alert(alert_id, symbol, ts, int(self.link_window_s))
             n_alerts += 1
         self.alerts += n_alerts
         return n_alerts
 
-    def _minutes(self):
+    def _load_news(self, path: str) -> list[dict]:
+        if not Path(path).exists():
+            return []
+        import sqlite3
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        try:
+            if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='news_alerts'").fetchone():
+                return []
+            out = []
+            for n in conn.execute("SELECT * FROM news_alerts WHERE mode='live' ORDER BY created_at"):
+                d = dict(n)
+                d["stocks"] = [dict(s) for s in conn.execute(
+                    "SELECT ticker, relation, direction, strength, reason FROM news_alert_stocks WHERE news_alert_id=?",
+                    (n["id"],))]
+                out.append(d)
+            return out
+        finally:
+            conn.close()
+
+    def _emit_news(self, upto: float) -> None:
+        while self.news_emitted < len(self.news) and self.news[self.news_emitted]["created_at"] <= upto:
+            n = self.news[self.news_emitted]
+            cur = self.out.conn.execute(
+                """INSERT INTO news_alerts (item_id, mode, created_at, published_at, source, event_type, confidence,
+                   headline, url, classifier) VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                (n["item_id"], "demo", n["created_at"], n["published_at"], n["source"], n["event_type"],
+                 n["confidence"], n["headline"], n["url"], n["classifier"]))
+            for st in n["stocks"]:
+                self.out.conn.execute("INSERT INTO news_alert_stocks (news_alert_id, ticker, relation, direction, strength, "
+                                      "reason) VALUES (?,?,?,?,?,?)", (cur.lastrowid, st["ticker"], st["relation"],
+                                                                     st["direction"], st["strength"], st["reason"]))
+            self.news_emitted += 1
+        self.out.conn.commit()
+
+    def _minutes(self, count_only: bool = False):
         cur_ts, group = None, []
         for symbol, ts, price in self.history.iter_bars("bars", self.index, self.session):
+            if self.days is not None and datetime.fromtimestamp(ts, self.tz).date() not in self.days:
+                continue
+            if count_only:
+                if ts != cur_ts:
+                    cur_ts = ts
+                    yield ts
+                continue
             if ts != cur_ts and group:
                 yield cur_ts, group
                 group = []
@@ -86,8 +152,9 @@ class DemoDriver:
     async def run(self) -> None:
         self.out.set_status("mode", {"mode": "demo", "run_id": self.run_id, "dataset": self.dataset["label"]})
         self.out.set_status("token", {"state": "not used", "note": "demo mode replays stored data; no Dhan login"})
-        self.out.set_status("feeds", {"_note": {"ok": None, "error": None,
-                                                "note": "demo mode: replayed data has no archived news"}})
+        self.out.set_status("news", {"replay": True, "archived_alerts": len(self.news),
+                                     "note": ("replaying archived news alerts with prices" if self.news else
+                                              "no archived news for these days yet; prices only")})
         warm_dates: set = set()
         prev = None
         for ts, group in self._minutes():
@@ -104,6 +171,8 @@ class DemoDriver:
                 else:
                     await self.sleep(gap / self.speed)
             self.sim_ts, self.market_open = ts, True
+            if self.news:
+                self._emit_news(ts)
             n = self._process(ts, group)
             self.minutes_done += 1
             if not warming or self.minutes_done % 60 == 0:

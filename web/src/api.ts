@@ -23,6 +23,44 @@ export type Alert = {
   latency_ms: number | null
   news: NewsItem[]
   reasons: { ma?: Reason; corr?: Reason }
+  linked_news: { news_alert_id: number; event_type: string; headline: string | null; source: string; minutes_after: number }[]
+}
+
+export type NewsStock = {
+  ticker: string
+  name: string
+  sector: string
+  relation: 'direct' | 'competitor' | 'supplier' | 'customer' | 'sector peer'
+  direction: 'up' | 'down' | null
+  strength: 'low' | 'medium' | 'high' | null
+  reason: string | null
+  t0: number | null
+  t0_rule: string | null
+  abn_15m: number | null
+  abn_1h: number | null
+  abn_close: number | null
+  evaluated_at: number | null
+  eval_note: string | null
+}
+
+export type NewsAlert = {
+  id: number
+  mode: 'live' | 'demo'
+  created_at: number
+  published_at: number | null
+  source: 'nse' | 'businessline'
+  event_type: string
+  confidence: number | null
+  headline: string | null
+  url: string
+  classifier: 'rules' | 'gemini'
+  latency_s: number | null
+  stocks: NewsStock[]
+  linked_price_alerts: { id: number; symbol: string; move: number; ts: number; direction: 1 | -1; minutes_after: number }[]
+}
+
+export type NewsDetail = NewsAlert & {
+  context?: { symbol: string; start: number; end: number; marker: number; prices: [number, number][]; index: [number, number][] }
 }
 
 export type AlertDetail = Alert & {
@@ -38,6 +76,7 @@ export type Me = {
   params: Record<string, number>
   sectors: string[]
   symbols: string[]
+  event_types: string[]
 }
 
 type Stamped<T> = { value: T; updated_at: number } | null
@@ -51,7 +90,17 @@ export type Status = {
   token: Stamped<{ state: string; expires_at?: string | null; auto_refresh?: boolean; error?: string | null; note?: string }>
   feeds: Stamped<Record<string, { ok: boolean | null; error: string | null; items?: number; last_ok_at?: number; note?: string }>>
   replay: Stamped<{ dataset: string; sim_ts: number | null; market_open: boolean; speed: number;
-    minutes_done: number; total_minutes: number; alerts: number; finished: boolean }>
+    minutes_done: number; total_minutes: number; alerts: number; finished: boolean;
+    news_archive?: { alerts: number; emitted: number; days: string[] } }>
+  news: Stamped<{
+    replay?: boolean; archived_alerts?: number; note?: string
+    last_poll_at?: number | null
+    feeds?: Record<string, { ok?: boolean; error?: string | null; last_ok_at?: number; new?: number; items?: number }>
+    items_today?: number; pending?: number; unclassified?: number; alerts_today?: number
+    gemini_configured?: boolean
+    gemini?: { model: string; used_today: number; daily_cap: number; paused_until: number | null; last_quota: Record<string, string> | null } | null
+    last_error?: string | null
+  }>
 }
 
 export type ResultRow = { variant: string; alerts: number; evaluable: number; false: number; n: number;
@@ -73,6 +122,12 @@ export const api = {
   status: () => get<Status>('/api/status'),
   results: () => get<{ sections: ResultSection[] }>('/api/results'),
   alert: (id: number) => get<AlertDetail>(`/api/alerts/${id}`),
+  newsItem: (id: number) => get<NewsDetail>(`/api/news/${id}`),
+  news: (q: Record<string, string | number | undefined>) => {
+    const p = new URLSearchParams()
+    for (const [k, v] of Object.entries(q)) if (v !== undefined && v !== '') p.set(k, String(v))
+    return get<{ items: NewsAlert[]; more: boolean }>(`/api/news?${p}`)
+  },
   alerts: (q: Record<string, string | number | undefined>) => {
     const p = new URLSearchParams()
     for (const [k, v] of Object.entries(q)) if (v !== undefined && v !== '') p.set(k, String(v))
@@ -120,4 +175,14 @@ export function ago(seconds: number) {
 export function fmtDate(ts: number, tz: string) {
   return new Intl.DateTimeFormat('en-GB', { timeZone: tz, day: '2-digit', month: 'short', year: 'numeric' })
     .format(new Date(ts * 1000))
+}
+
+export const SOURCE_LABEL: Record<string, string> = { nse: 'NSE filing', businessline: 'BusinessLine' }
+
+export function fmtDuration(s: number | null | undefined) {
+  if (s === null || s === undefined) return '—'
+  if (s < 0) return 'before publication'
+  if (s < 90) return `${Math.round(s)} s`
+  if (s < 5400) return `${Math.round(s / 60)} min`
+  return `${(s / 3600).toFixed(1)} h`
 }

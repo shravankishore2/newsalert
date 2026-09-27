@@ -94,7 +94,7 @@ export default function Feed({ me, pushed, conn }: { me: Me; pushed: Alert[]; co
   return (
     <>
       <div className="feed-head">
-        <h1>Alerts</h1>
+        <h2 style={{ margin: 0, fontSize: 17 }}>Price-move alerts</h2>
         <span className="live-pill"><span className={`dot ${conn === 'open' ? 'good' : 'warn'}`} aria-hidden="true" />
           {conn === 'open' ? 'Live: new alerts appear automatically' : 'Reconnecting…'}</span>
       </div>
@@ -151,7 +151,8 @@ export default function Feed({ me, pushed, conn }: { me: Me; pushed: Alert[]; co
               <div className="when num">
                 {fmtTime(a.ts, tz)} {tzAbbr(tz)}
                 <div className="muted">{fmtDate(a.ts, tz)}</div>
-                {a.news.length > 0 && <div>{a.news.length} news</div>}
+                {a.linked_news.length > 0 && <div><a href={`#/news/${a.linked_news[0].news_alert_id}`}
+                  onClick={(e) => e.stopPropagation()}>↳ after news</a></div>}
               </div>
             </a>
           </li>

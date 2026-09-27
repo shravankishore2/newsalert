@@ -204,7 +204,7 @@ def test_stream_delivers_backlog_since_id(env):
     with client.stream("GET", "/api/stream", params={"since": 0, "max_events": 3}) as r:  # 2 alerts + status
         assert r.headers["content-type"].startswith("text/event-stream")
         ev = read_events(r, 2)
-    assert [int(e["id"]) for e in ev] == [a1, a2]
+    assert [int(e["id"].split(":p")[1]) for e in ev] == [a1, a2]
     assert json.loads(ev[1]["data"])["symbol"] == "BETA"
 
 
@@ -214,7 +214,7 @@ def test_stream_resumes_from_last_event_id(env):
     login(client)
     with client.stream("GET", "/api/stream", params={"max_events": 2}, headers={"Last-Event-ID": str(a1)}) as r:
         ev = read_events(r, 1)
-    assert int(ev[0]["id"]) == a2
+    assert int(ev[0]["id"].split(":p")[1]) == a2
 
 
 def test_stream_pushes_alert_written_after_connect(env, tmp_path):
@@ -286,3 +286,73 @@ def test_token_status_falls_back_when_live_has_not_run(tmp_path):
     assert c.get("/api/status").json()["token"] == fb
     Store(db).set_status("token", {"state": "error", "error": "x"})   # live-mode status wins once present
     assert c.get("/api/status").json()["token"]["value"]["state"] == "error"
+
+
+# --- news-first -----------------------------------------------------------------------------
+
+def add_news(store, nid, ticker="ALPHA", direction="up", event="order/contract win", created=T0, headline="Alpha wins order",
+             relation="direct", source="businessline"):
+    store.conn.execute("INSERT INTO news_alerts (id, item_id, created_at, published_at, source, event_type, confidence, "
+                       "headline, url, classifier) VALUES (?,?,?,?,?,?,0.8,?,?,'gemini')",
+                       (nid, nid, created, created - 120, source, event, headline, f"https://example.test/{nid}"))
+    store.conn.execute("INSERT INTO news_alert_stocks (news_alert_id, ticker, relation, direction, strength, reason) "
+                       "VALUES (?,?,?,?,'medium','big order')", (nid, ticker, relation, direction))
+    store.conn.commit()
+
+
+def test_news_list_filters_detail_and_links(env):
+    client, store, _ = env
+    add_news(store, 1, "ALPHA", "up", headline="Alpha wins order")
+    add_news(store, 2, "BETA", "down", event="regulatory action", headline="Beta Bank penalised")
+    pid = add_alert(store, "ALPHA", T0 + 1200)
+    store.link_price_alert(pid, "ALPHA", T0 + 1200)
+    login(client)
+    ids = lambda **q: [i["id"] for i in client.get("/api/news", params=q).json()["items"]]
+    assert ids() == [2, 1]
+    assert ids(symbol="alpha") == [1] and ids(direction="down") == [2]
+    assert ids(sector="Financial Services") == [2] and ids(event_type="regulatory action") == [2]
+    assert ids(q="penalised") == [2] and ids(q="alpha industries") == [1]
+    n = client.get("/api/news").json()["items"][1]
+    assert n["latency_s"] == 120 and n["stocks"][0]["name"] == "Alpha Industries Ltd."
+    assert n["linked_price_alerts"][0]["id"] == pid and n["linked_price_alerts"][0]["minutes_after"] == 20
+    d = client.get("/api/news/1").json()
+    assert d["context"]["symbol"] == "ALPHA" and d["context"]["prices"] and d["context"]["marker"] == T0
+    price = client.get(f"/api/alerts/{pid}").json()
+    assert price["linked_news"][0]["news_alert_id"] == 1 and price["linked_news"][0]["headline"] == "Alpha wins order"
+    assert client.get("/api/news/99").status_code == 404
+    assert "order/contract win" in client.get("/api/me").json()["event_types"]
+
+
+def test_stream_pushes_news_and_resumes_both_cursors(env):
+    client, store, _ = env
+    add_news(store, 1)
+    a1 = add_alert(store)
+    login(client)
+    with client.stream("GET", "/api/stream", params={"since": 0, "since_news": 0, "max_events": 3}) as r:
+        evs, cur = [], {}
+        for line in r.iter_lines():
+            if line == "":
+                if cur.get("event") in ("news", "alert"):
+                    evs.append(cur)
+                cur = {}
+                if len(evs) == 2:
+                    break
+            elif ":" in line and not line.startswith(":"):
+                k, v = line.split(":", 1)
+                cur[k] = v.strip()
+    assert [e["event"] for e in evs] == ["news", "alert"] and evs[1]["id"] == f"n1:p{a1}"
+    add_news(store, 2, "BETA")
+    with client.stream("GET", "/api/stream", params={"max_events": 1}, headers={"Last-Event-ID": f"n1:p{a1}"}) as r:
+        got = None
+        for line in r.iter_lines():
+            if line.startswith("data:") and '"stocks"' in line:
+                got = json.loads(line[5:])
+                break
+    assert got["id"] == 2 and got["stocks"][0]["ticker"] == "BETA"
+
+
+def test_status_includes_news_service(env):
+    client, store, _ = env
+    store.set_status("news", {"last_poll_at": T0, "pending": 3, "gemini_configured": False})
+    login(client)
+    assert client.get("/api/status").json()["news"]["value"]["pending"] == 3

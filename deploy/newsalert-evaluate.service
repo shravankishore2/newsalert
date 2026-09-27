@@ -1,0 +1,9 @@
+# Event study for news alerts whose session has closed; rewrites the news section of docs/RESULTS.md.
+[Unit]
+Description=newsalert news event study
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/newsalert
+ExecStart=/home/ubuntu/newsalert/.venv/bin/python -m newsalert evaluate-news

@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 import yaml
 
 from newsalert.auth import DhanAuth
-from newsalert.clients import DhanClient, Instrument, RssFeed
+from newsalert.clients import DhanClient, Instrument
 from newsalert.config import Ticker
 from newsalert.live import LiveMonitor
 from newsalert.market import IST, MarketCalendar
@@ -27,7 +27,6 @@ def setup(start, *, params=None, lead=30):
     clock = FakeClock(start)
     fake = FakeDhan(clock)
     fake.prices = {("IDX_I", "13"): 25000.0, ("NSE_EQ", "101"): 100.0, ("NSE_EQ", "202"): 50.0}
-    fake.rss[NSE_FEED] = NSE_XML
     http = fake.client()
     auth = DhanAuth(http, CLIENT_ID, PIN, SECRET, None, clock=clock)
     dhan = DhanClient(http, auth, RateLimiter([(1, 1.0)], clock=clock, sleep=clock.sleep),
@@ -36,7 +35,6 @@ def setup(start, *, params=None, lead=30):
     mon = LiveMonitor(
         tickers=[Ticker("ALPHA", "Alpha Industries Ltd.", "101"), Ticker("BETA", "Beta Ltd.", "202")],
         index=NIFTY, engine=Engine(params, "NIFTY50"), dhan=dhan, auth=auth,
-        feeds=[RssFeed(http, "NSE announcements", NSE_FEED, clock=clock)],
         store=Store(":memory:"), calendar=CAL, cycle_s=60, token_refresh_lead_min=lead,
         clock=clock, sleep=clock.sleep)
     return clock, fake, http, mon
@@ -51,10 +49,15 @@ async def test_one_batched_ltp_request_covers_every_ticker():
     assert (s.ok, s.failed) == (3, 0)
 
 
-async def test_alert_stored_with_reasons_missing_ticker_skipped_and_news_attached():
+async def test_alert_stored_with_reasons_missing_ticker_skipped_and_linked_to_news():
     params = Params(warmup_returns=3, ma_enabled=True, ma_fast_min=2, ma_slow_min=10, corr_enabled=False,
                     move_window_min=5)
     clock, fake, http, mon = setup(datetime(2026, 10, 1, 10, 0, tzinfo=IST), params=params)
+    # a news alert on ALPHA 20 minutes before the move (written by the news service)
+    mon.store.conn.execute("INSERT INTO news_alerts (id, item_id, created_at, source, event_type, headline, url, classifier) "
+                           "VALUES (7, 1, ?, 'nse', 'order/contract win', 'ALPHA: Order/contract win', 'u', 'rules')",
+                           (clock() + 8 * 60 - 20 * 60,))
+    mon.store.conn.execute("INSERT INTO news_alert_stocks (news_alert_id, ticker, relation, direction) VALUES (7,'ALPHA','direct','up')")
     async with http:
         for _ in range(8):
             await mon.run_cycle()
@@ -69,13 +72,12 @@ async def test_alert_stored_with_reasons_missing_ticker_skipped_and_news_attache
     assert s.failures == ["BETA"] and s.failed == 1
     assert mon.engine.series["BETA"].px[-1] == 50.0   # nothing fed for the missing ticker
     row = mon.store.conn.execute(
-        "SELECT symbol, delivered, latency_ms, news, fast_sma, slow_sma, fast_move FROM alerts").fetchone()
-    assert row[0] == "ALPHA" and row[1] == 1 and row[2] > 0
-    news = json.loads(row[3])
-    assert "order win" in news[0]["headline"] and set(news[0]) == {"source", "headline", "url", "published"}
+        "SELECT id, symbol, delivered, latency_ms, fast_sma, slow_sma, fast_move FROM alerts").fetchone()
+    assert row[1] == "ALPHA" and row[2] == 1 and row[3] > 0
     assert row[4] > row[5] and row[6] > 0              # why the MA filter passed is stored
-    st = mon.store.get_status()
-    assert st["cycle"]["value"]["missing"] == ["BETA"] and st["feeds"]["value"]["NSE announcements"]["ok"]
+    link = mon.store.conn.execute("SELECT price_alert_id, news_alert_id, minutes_after FROM price_news_links").fetchone()
+    assert link[0] == row[0] and link[1] == 7 and 20 <= link[2] <= 22
+    assert mon.store.get_status()["cycle"]["value"]["missing"] == ["BETA"]
 
 
 async def test_failed_request_skips_whole_cycle():
@@ -84,18 +86,6 @@ async def test_failed_request_skips_whole_cycle():
     async with http:
         s = await mon.run_cycle()
     assert (s.ok, s.failed) == (0, 3) and mon.engine.series == {}
-
-
-async def test_rss_feed_cached_between_alerts():
-    clock, fake, http, mon = setup(datetime(2026, 10, 1, 10, 0, tzinfo=IST))
-    feed = mon.feeds[0]
-    async with http:
-        await feed.items()
-        clock.t += 120
-        await feed.items()        # within 5-min TTL: no request
-        clock.t += 400
-        await feed.items()
-    assert len(fake.rss_calls) == 2
 
 
 async def test_scheduler_skips_holiday_weekend_and_refreshes_token_before_open():

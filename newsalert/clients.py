@@ -143,20 +143,6 @@ class DhanClient:
 
 # --- news --------------------------------------------------------------------
 
-_SUFFIX = re.compile(r"\b(ltd|limited|inc|corp|corporation|co|company|india|\(india\))\.?$", re.I)
-
-
-def short_name(name: str) -> str:
-    """'Reliance Industries Ltd.' -> 'Reliance Industries' (used to match headlines)."""
-    n = name.strip()
-    for _ in range(3):
-        n2 = _SUFFIX.sub("", n).strip(" .,")
-        if n2 == n or not n2:
-            break
-        n = n2
-    return n
-
-
 @dataclass(frozen=True)
 class NewsItem:
     source: str
@@ -214,12 +200,3 @@ def _norm_date(s: str) -> str:
         except (ValueError, TypeError):
             continue
     return s
-
-
-def match_news(items: list[NewsItem], symbol: str, name: str, limit: int = 3) -> list[NewsItem]:
-    """NSE items match on the symbol in the link; other feeds on the company's short name."""
-    sn = short_name(name)
-    pat = re.compile(rf"\b{re.escape(sn)}\b", re.I) if len(sn) >= 3 else None
-    hits = [i for i in items if (i.symbol_hint == symbol) or
-            (not i.symbol_hint and pat is not None and pat.search(i.headline))]
-    return sorted(hits, key=lambda i: i.published, reverse=True)[:limit]

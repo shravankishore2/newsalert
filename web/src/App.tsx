@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useState } from 'react'
-import { api, Unauthorized, type Alert, type Me } from './api'
+import { api, Unauthorized, type Alert, type Me, type NewsAlert } from './api'
 import { useRoute } from './route'
 import { useStream } from './stream'
 import Login from './components/Login'
 import ReplayBanner from './components/ReplayBanner'
 import StatusBar from './components/StatusBar'
-import Feed from './components/Feed'
+import NewsFeed from './components/NewsFeed'
+import NewsDetail from './components/NewsDetail'
 import AlertDetail from './components/AlertDetail'
 import Results from './components/Results'
 
@@ -15,6 +16,7 @@ export default function App() {
   const [auth, setAuth] = useState<Auth>('checking')
   const [me, setMe] = useState<Me | null>(null)
   const [pushed, setPushed] = useState<Alert[]>([])
+  const [pushedNews, setPushedNews] = useState<NewsAlert[]>([])
   const route = useRoute()
 
   const loadMe = useCallback(async () => {
@@ -30,8 +32,9 @@ export default function App() {
   useEffect(() => { loadMe() }, [loadMe])
 
   const onAlert = useCallback((a: Alert) => setPushed((p) => [a, ...p].slice(0, 500)), [])
+  const onNews = useCallback((n: NewsAlert) => setPushedNews((p) => [n, ...p].slice(0, 500)), [])
   const onAuthLost = useCallback(() => { setAuth('out'); setMe(null) }, [])
-  const { status, conn } = useStream(auth === 'in', onAlert, onAuthLost)
+  const { status, conn } = useStream(auth === 'in', onAlert, onNews, onAuthLost)
 
   if (auth === 'checking') return <div className="login"><p className="muted">Loading…</p></div>
   if (auth === 'out' || !me) return <Login onDone={loadMe} />
@@ -57,7 +60,8 @@ export default function App() {
       </header>
       <StatusBar me={me} status={status} conn={conn} />
       <main className="main">
-        {route.page === 'feed' && <Feed me={me} pushed={pushed} conn={conn} />}
+        {route.page === 'feed' && <NewsFeed me={me} pushedNews={pushedNews} pushedPrice={pushed} conn={conn} />}
+        {route.page === 'news' && <NewsDetail key={`n${route.id}`} me={me} id={route.id} />}
         {route.page === 'alert' && <AlertDetail key={route.id} me={me} id={route.id} />}
         {route.page === 'results' && <Results />}
       </main>

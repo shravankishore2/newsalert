@@ -58,15 +58,34 @@ dhan:
   token_refresh_margin_h: 2  # also refresh when a token has less than this left
 
 news:
-  cache_ttl_s: 300           # each feed fetched at most once per 5 min, only when alerts fire
+  # Terms reviewed 2026-09-27/28; see README "News sources".
+  #  - NSE: never sent to an LLM, text never stored (NSE terms forbid transmitting/storing
+  #    without written permission); classified by local rules, only derived fields kept.
+  #  - BusinessLine: personal, non-commercial; headline + RSS summary go to Gemini (free tier,
+  #    owner's choice: Google may use free-tier inputs to improve its products).
+  poll_s: 180                # each feed every 3 min, conditional GET (ETag/If-Modified-Since)
+  max_age_min: 120           # older items when first seen are archived, not alerted or classified
+  min_confidence: 0.0        # news alerts need at least this classification confidence
+  link_window_min: 60        # a price move this soon after a news alert on the stock gets linked
   feeds:
-    # Terms reviewed 2026-09-27; see README "News sources". Personal, non-commercial use.
     - name: NSE announcements
+      source: nse
       url: https://nsearchives.nseindia.com/content/RSS/Online_announcements.xml
     - name: BusinessLine markets
+      source: businessline
       url: https://www.thehindubusinessline.com/markets/feeder/default.rss
     - name: BusinessLine companies
+      source: businessline
       url: https://www.thehindubusinessline.com/companies/feeder/default.rss
+  gemini:
+    model: gemini-3.5-flash-lite
+    base_url: https://generativelanguage.googleapis.com/v1beta
+    # Free-tier limits aren't published (per project, shown in AI Studio). Conservative caps;
+    # a 429 pauses for Google's retryDelay and its reported quota shows on the dashboard.
+    requests_per_minute: 5
+    requests_per_day: 100      # counted per Pacific-time day, when Google resets quotas
+    batch_size: 10             # headlines per request
+    timeout_s: 60
 
 dashboard:
   host: 127.0.0.1            # local only; the news licences don't allow public republishing

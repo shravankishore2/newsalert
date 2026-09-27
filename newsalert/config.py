@@ -19,6 +19,7 @@ class Secrets:
     dhan_totp_secret: str
     dhan_access_token: str
     dashboard_password: str
+    gemini_api_key: str
 
     def missing(self, *names: str) -> list[str]:
         """Env-var names (e.g. DHAN_PIN) of the given fields that are empty."""
@@ -48,6 +49,7 @@ def load_secrets(env_file: str | Path = ".env") -> Secrets:
         dhan_totp_secret=os.getenv("DHAN_TOTP_SECRET", ""),
         dhan_access_token=os.getenv("DHAN_ACCESS_TOKEN", ""),
         dashboard_password=os.getenv("DASHBOARD_PASSWORD", ""),
+        gemini_api_key=os.getenv("GEMINI_API_KEY", ""),
     )
 
 

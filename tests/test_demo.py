@@ -42,12 +42,13 @@ async def test_demo_replays_into_labelled_demo_db(tmp_path):
                    alerts_cfg=CFG["alerts"], speed=60, warm_days=1, sleep=sleep)
     await d.run()
     out = Store(str(tmp_path / "demo.db"))
-    rows = out.conn.execute("SELECT mode, symbol, news, fast_sma FROM alerts ORDER BY id").fetchall()
-    assert rows and all(r[0] == "demo" and r[1] == "ALPHA" and r[2] == "[]" and r[3] is not None for r in rows)
+    rows = out.conn.execute("SELECT mode, symbol, fast_sma FROM alerts ORDER BY id").fetchall()
+    assert rows and all(r[0] == "demo" and r[1] == "ALPHA" and r[2] is not None for r in rows)
     st = out.get_status()
     assert st["mode"]["value"]["mode"] == "demo" and st["replay"]["value"]["finished"]
     assert st["replay"]["value"]["dataset"] == "Synthetic test replay"
     assert st["token"]["value"]["state"] == "not used"
+    assert st["news"]["value"]["archived_alerts"] == 0
     # day 1 replays instantly; day 2 is paced at 60x (374 one-minute steps = 374 s) plus one capped overnight gap
     assert max(sleep.calls) <= MAX_GAP_SLEEP_S
     assert abs(sleep.total - (374 + MAX_GAP_SLEEP_S)) < 1e-6
@@ -72,3 +73,30 @@ async def test_demo_db_is_rebuilt_each_start(tmp_path):
     DemoDriver(history_db=str(tmp_path / "h.db"), demo_db=str(tmp_path / "demo.db"), dataset=DATASET,
                alerts_cfg=CFG["alerts"], sleep=Sleeper())
     assert Store(str(tmp_path / "demo.db")).get_status() == {}
+
+
+async def test_demo_replays_archived_news_with_prices_on_archive_days(tmp_path):
+    build_history(str(tmp_path / "h.db"), days=3)                      # 21, 22, 23 Sep
+    archive = Store(str(tmp_path / "live.db"))
+    day3_1100 = datetime(2026, 9, 23, 11, 0, tzinfo=IST).timestamp()  # ALPHA climbs from 11:15 each day
+    archive.conn.execute("INSERT INTO news_alerts (id, item_id, mode, created_at, published_at, source, event_type, "
+                         "confidence, headline, url, classifier) VALUES (1, 1, 'live', ?, ?, 'businessline', "
+                         "'order/contract win', 0.8, 'Alpha wins order', 'https://example.test/a', 'gemini')",
+                         (day3_1100, day3_1100 - 60))
+    archive.conn.execute("INSERT INTO news_alert_stocks (news_alert_id, ticker, relation, direction, strength, reason) "
+                         "VALUES (1, 'ALPHA', 'direct', 'up', 'medium', 'order')")
+    archive.conn.commit()
+    sleep = Sleeper()
+    d = DemoDriver(history_db=str(tmp_path / "h.db"), demo_db=str(tmp_path / "demo.db"), dataset=DATASET,
+                   alerts_cfg=CFG["alerts"], speed=60, sleep=sleep, news_db=str(tmp_path / "live.db"))
+    assert sorted(str(x) for x in d.days) == ["2026-09-22", "2026-09-23"]      # news day + one warm-up day
+    await d.run()
+    out = Store(str(tmp_path / "demo.db"))
+    news = out.conn.execute("SELECT id, mode, headline, created_at FROM news_alerts").fetchall()
+    assert news == [(1, "demo", "Alpha wins order", day3_1100)]
+    day3 = [r for r in out.conn.execute("SELECT id, ts FROM alerts WHERE symbol='ALPHA'")
+            if datetime.fromtimestamp(r[1], IST).date().day == 23]
+    links = out.conn.execute("SELECT price_alert_id, news_alert_id FROM price_news_links").fetchall()
+    assert day3 and links == [(day3[0][0], 1)]
+    assert out.get_status()["replay"]["value"]["news_archive"]["emitted"] == 1
+    assert all(datetime.fromtimestamp(t, IST).date().day != 21 for (t,) in out.conn.execute("SELECT ts FROM alerts"))

@@ -1,0 +1,10 @@
+[Unit]
+Description=Run the news event study after the NSE close (15:50 IST, weekdays)
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 15:50:00 Asia/Kolkata
+Persistent=true
+Unit=newsalert-evaluate.service
+
+[Install]
+WantedBy=timers.target

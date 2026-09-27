@@ -12,6 +12,8 @@ Scheduling
   for that cycle. Either way the engine sees nothing, so no alert uses stale data.
 
 Alerts are written to SQLite; the dashboard (web/app.py) pushes new rows to browsers.
+News comes from the separate news service (news/ingest.py); a price alert on a stock within
+`link_window_min` after a news alert on that stock is linked to it.
 Latency is measured from the LTP response being parsed (received) to the alert row being
 committed (sent). The dashboard's push loop adds at most its poll interval on top.
 Status for the dashboard (cycle times, token, feed health) is written to the status table.
@@ -28,15 +30,13 @@ from datetime import datetime, timedelta, timezone
 from typing import Awaitable, Callable
 
 from .auth import AuthError, DhanAuth
-from .clients import DhanClient, FetchError, Instrument, RssFeed, TokenRejected, match_news
+from .clients import DhanClient, FetchError, Instrument, TokenRejected
 from .config import Ticker
 from .market import IST, MarketCalendar
 from .signals import Alert, Engine
 from .store import Store
 
 log = logging.getLogger(__name__)
-
-FEED_HEALTH_INTERVAL_S = 900  # during market hours, re-check each feed at most every 15 min
 
 
 @dataclass
@@ -47,15 +47,10 @@ class CycleStats:
     failures: list[str] = field(default_factory=list)
 
 
-def news_to_rows(items) -> list[dict]:
-    """Only headline, source, link and time are kept; never article text."""
-    return [{"source": n.source, "headline": n.headline, "url": n.url, "published": n.published} for n in items]
-
-
 class LiveMonitor:
     def __init__(self, *, tickers: list[Ticker], index: Instrument, engine: Engine, dhan: DhanClient,
-                 auth: DhanAuth, feeds: list[RssFeed], store: Store, calendar: MarketCalendar,
-                 cycle_s: float = 60, token_refresh_lead_min: float = 30,
+                 auth: DhanAuth, store: Store, calendar: MarketCalendar,
+                 cycle_s: float = 60, token_refresh_lead_min: float = 30, link_window_min: float = 60,
                  clock: Callable[[], float] = time.time,
                  sleep: Callable[[float], Awaitable[None]] = asyncio.sleep):
         self.tickers = tickers
@@ -63,13 +58,12 @@ class LiveMonitor:
         self.index = index
         self.instruments = [index] + [Instrument(t.symbol, t.security_id, "NSE_EQ", "EQUITY") for t in tickers]
         self.engine, self.dhan, self.auth = engine, dhan, auth
-        self.feeds, self.store, self.calendar = feeds, store, calendar
+        self.store, self.calendar = store, calendar
+        self.link_window_s = link_window_min * 60
         self.cycle_s, self.refresh_lead = cycle_s, timedelta(minutes=token_refresh_lead_min)
         self.clock, self.sleep = clock, sleep
         self.run_id = "live-" + uuid.uuid4().hex[:8]
         self._bg: set[asyncio.Task] = set()
-        self._feed_checked_at = 0.0
-        self._feed_health: dict[str, dict] = {}
 
     def now(self) -> datetime:
         return datetime.fromtimestamp(self.clock(), timezone.utc)
@@ -83,31 +77,6 @@ class LiveMonitor:
             "auto_refresh": self.auth.can_generate,
             "error": error,
         }, now=self.clock())
-
-    def _record_feed(self, feed: RssFeed, error: str | None, n: int = 0) -> None:
-        prev = self._feed_health.get(feed.name, {})
-        self._feed_health[feed.name] = {
-            "ok": error is None, "error": error, "items": n if error is None else prev.get("items"),
-            "last_ok_at": self.clock() if error is None else prev.get("last_ok_at"),
-            "checked_at": self.clock()}
-        self.store.set_status("feeds", self._feed_health, now=self.clock())
-
-    async def _feed_items(self, feed: RssFeed) -> list:
-        try:
-            items = await feed.items()
-        except FetchError as e:
-            self._record_feed(feed, str(e))
-            raise
-        self._record_feed(feed, None, len(items))
-        return items
-
-    async def check_feeds(self) -> None:
-        self._feed_checked_at = self.clock()
-        for feed in self.feeds:
-            try:
-                await self._feed_items(feed)
-            except FetchError as e:
-                log.warning("news feed %s unhealthy: %s", feed.name, e)
 
     # -- cycle ------------------------------------------------------------------------
     async def run_cycle(self) -> CycleStats:
@@ -152,19 +121,9 @@ class LiveMonitor:
         self.store.conn.execute("UPDATE alerts SET sent_ns=?, latency_ms=?, delivered=1 WHERE id=?",
                                 (sent_ns, (sent_ns - received_ns) / 1e6, alert_id))
         self.store.conn.commit()
-        log.info("ALERT %s %+.2f%% latency=%.1fms", alert.symbol, alert.move * 100, (sent_ns - received_ns) / 1e6)
-        task = asyncio.create_task(self._news(alert, alert_id))
-        self._bg.add(task)
-        task.add_done_callback(self._bg.discard)
-
-    async def _news(self, alert: Alert, alert_id: int) -> None:
-        found = []
-        for feed in self.feeds:
-            try:
-                found += match_news(await self._feed_items(feed), alert.symbol, self.names.get(alert.symbol, ""))
-            except FetchError as e:
-                log.warning("news feed %s failed: %s", feed.name, e)
-        self.store.set_alert_news(alert_id, news_to_rows(found))
+        linked = self.store.link_price_alert(alert_id, alert.symbol, alert.ts, int(self.link_window_s))
+        log.info("ALERT %s %+.2f%% latency=%.1fms%s", alert.symbol, alert.move * 100, (sent_ns - received_ns) / 1e6,
+                 f" linked to news {linked}" if linked else "")
 
     async def drain(self) -> None:
         if self._bg:
@@ -212,10 +171,6 @@ class LiveMonitor:
                 await self._sleep_until(nxt)
                 continue
             start = self.clock()
-            if start - self._feed_checked_at >= FEED_HEALTH_INTERVAL_S:
-                task = asyncio.create_task(self.check_feeds())
-                self._bg.add(task)
-                task.add_done_callback(self._bg.discard)
             stats = await self.run_cycle()
             n += 1
             log.info("cycle %d: %d ok, %d failed, %d alerts in %.2fs",

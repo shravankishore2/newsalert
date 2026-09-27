@@ -18,7 +18,9 @@ export default function Results() {
       {sections.map((s) => (
         <section className="results-section" key={s.key} aria-labelledby={`r-${s.key}`}>
           <h2 id={`r-${s.key}`}>{s.title}</h2>
-          {s.has_numbers ? (
+          {s.key === 'news' ? (
+            <div className="markdown"><Markdown remarkPlugins={[remarkGfm]}>{s.markdown.replace(/^## .+\n/, '')}</Markdown></div>
+          ) : s.has_numbers ? (
             <>
               <div className="tiles">
                 {s.false_alert_rows.map((r) => (
@@ -34,10 +36,10 @@ export default function Results() {
           ) : (
             <div className="notice">No numbers for this market yet: the replay hasn't been run. Details below.</div>
           )}
-          <details open={!s.has_numbers}>
+          {s.key !== 'news' && <details open={!s.has_numbers}>
             <summary className="secondary" style={{ cursor: 'pointer', marginBottom: 8 }}>Full section</summary>
             <div className="markdown"><Markdown remarkPlugins={[remarkGfm]}>{s.markdown.replace(/^## .+\n/, '')}</Markdown></div>
-          </details>
+          </details>}
         </section>
       ))}
     </>
