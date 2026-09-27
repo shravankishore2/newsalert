@@ -224,6 +224,21 @@ class DhanAuth:
                                 "or set DHAN_PIN and DHAN_TOTP_SECRET for automatic refresh")
         return self.token.access_token
 
+    def reload_cache(self) -> bool:
+        """Adopt a newer token another process (e.g. the 08:30 refresh job) wrote to the shared
+        cache. Returns True if the in-memory token changed."""
+        cached = self._load()
+        if cached and (self.token is None or (cached.access_token != self.token.access_token
+                                              and cached.expiry > self.token.expiry)):
+            self.token = cached
+            return True
+        return False
+
     def invalidate(self) -> None:
-        """Called when Dhan rejects the token (e.g. DH-901); next ensure() regenerates."""
+        """Called when Dhan rejects the token (e.g. DH-901). If another process has cached a
+        different, newer token, use that; otherwise the next ensure() regenerates."""
+        rejected = self.token.access_token if self.token else None
         self.token = None
+        cached = self._load()
+        if cached and cached.access_token != rejected and cached.expiry > self.now():
+            self.token = cached

@@ -132,6 +132,8 @@ class LiveMonitor:
     # -- scheduler ------------------------------------------------------------------
     async def pre_open(self, session_close: datetime) -> None:
         """Make sure the token outlives the coming session (refresh margin included)."""
+        if self.auth.reload_cache():
+            log.info("using the token refreshed by another process")
         tok = self.auth.token
         if tok is None or tok.expiry < session_close + self.auth.refresh_margin:
             try:

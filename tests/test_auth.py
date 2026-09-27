@@ -198,3 +198,25 @@ async def test_totp_not_sent_in_last_seconds_of_its_window(tmp_path):
     assert clock.sleeps == [2.0]                                  # 1.5 s left + 0.5 s margin
     assert fake.auth_calls[0]["totp"] == totp(SECRET, clock())    # code from the new window
     assert int(clock()) % 30 < 3
+
+
+async def test_running_process_adopts_token_refreshed_by_another(tmp_path):
+    """The 08:30 refresh job writes a new token to the shared cache; the monitor that has been
+    running since boot picks it up at pre-open, and on rejection prefers it over regenerating."""
+    clock = FakeClock(T)
+    fake = FakeDhan(clock)
+    http = fake.client()
+    monitor = DhanAuth(http, CLIENT_ID, PIN, SECRET, tmp_path / "tok.json", clock=clock)
+    job = DhanAuth(http, CLIENT_ID, PIN, SECRET, tmp_path / "tok.json", clock=clock)
+    async with http:
+        await monitor.generate()                       # tok-1, held in memory by the monitor
+        clock.t += 3600
+        await job.generate()                           # tok-2, written to the cache by the job
+        assert monitor.token.access_token == "tok-1"
+        assert monitor.reload_cache() and monitor.token.access_token == "tok-2"
+        assert not monitor.reload_cache()              # nothing newer: no change
+        monitor.token = type(monitor.token)("tok-1", monitor.token.expiry)   # pretend it still had tok-1
+        monitor.invalidate()                           # tok-1 rejected -> use cached tok-2, no new call
+        assert monitor.token.access_token == "tok-2" and fake.token_n == 2
+        monitor.invalidate()                           # tok-2 rejected too -> nothing usable cached
+        assert monitor.token is None
