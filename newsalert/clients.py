@@ -31,9 +31,10 @@ class TokenRejected(FetchError):
     """Dhan says the access token is invalid or expired."""
 
 
-# Dhan error codes: DH-901 invalid/expired token; 807/809 token expired/invalid on data
-# APIs; DH-904 too many requests.
-_TOKEN_CODES = {"DH-901", "807", "809"}
+# Dhan error codes: DH-901 invalid/expired token; 807/808/809 token expired/auth failed/
+# invalid on data APIs; DH-904 too many requests. Dhan also returns DH-906 with
+# "Invalid Token" (seen live 2026-09-27), so token errors are also detected by message.
+_TOKEN_CODES = {"DH-901", "807", "808", "809"}
 _RATE_CODES = {"DH-904", "805"}
 
 
@@ -45,9 +46,16 @@ def _dhan_error_code(resp: httpx.Response) -> str | None:
     if not isinstance(body, dict):
         return None
     code = body.get("errorCode")  # trading-style errors: {"errorCode": "DH-901", ...}
+    if code and "token" in str(body.get("errorMessage", "")).lower():
+        return "DH-901"               # e.g. {"errorCode": "DH-906", "errorMessage": "Invalid Token"}
     remarks = body.get("remarks")
     if not code and isinstance(remarks, dict):  # data-API errors: {"remarks": {"error_code": "807"}}
         code = remarks.get("error_code")
+    data = body.get("data")
+    if not code and isinstance(data, dict) and len(data) == 1:
+        k = next(iter(data))          # LTP errors: {"data": {"808": "Authentication Failed ..."}, "status": "failed"}
+        if k.isdigit() and body.get("status") == "failed":
+            code = k
     return str(code) if code else None
 
 

@@ -116,3 +116,24 @@ async def test_fetch_history_stores_bars_and_reports_problems():
     assert rep["bars"] == 4 and rep["empty"] == ["EMPTY"] and list(rep["out_of_session"]) == ["RELIANCE"]
     assert len(fake.intraday_calls) == 3 * 2  # 120 days -> two <=90-day windows per instrument
     assert store.bar_summary("bars")[:2] == (4, 2)
+
+
+@pytest.mark.parametrize("resp", [
+    httpx.Response(400, json={"errorType": "Order_Error", "errorCode": "DH-906", "errorMessage": "Invalid Token"}),
+    httpx.Response(401, json={"data": {"808": "Authentication Failed - Client ID or Token invalid"}, "status": "failed"}),
+    httpx.Response(400, json={"status": "failed", "remarks": {"error_code": "807"}}),
+])
+async def test_token_errors_as_dhan_actually_sends_them(resp):
+    """Bodies as returned by Dhan for a bad token (DH-906 variant captured 2026-09-27)."""
+    from newsalert.clients import TokenRejected
+    clock = FakeClock(T)
+    fake = FakeDhan(clock)
+
+    def h(req):
+        return fake.handler(req) if req.url.host == "auth.dhan.co" else resp
+
+    http, dhan = make(fake, clock, h)
+    async with http:
+        with pytest.raises(TokenRejected):
+            await dhan.ltp([Instrument("A", "1", "NSE_EQ", "EQUITY")])
+    assert dhan.auth.token is None

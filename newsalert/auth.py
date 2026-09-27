@@ -46,6 +46,20 @@ class AuthError(Exception):
     pass
 
 
+def token_from_jwt(jwt: str, client_id: str) -> "Token":
+    """Wrap an access token pasted from Dhan Web. Reads `exp` and `dhanClientId` from the JWT
+    payload (not verified; Dhan does that) so expiry is known without an API call."""
+    try:
+        payload = jwt.split(".")[1]
+        claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+        exp = datetime.fromtimestamp(int(claims["exp"]), IST)
+    except (IndexError, ValueError, KeyError, TypeError):
+        raise AuthError("DHAN_ACCESS_TOKEN is not a readable Dhan JWT") from None
+    if str(claims.get("dhanClientId", client_id)) != str(client_id):
+        raise AuthError("DHAN_ACCESS_TOKEN belongs to a different client ID than DHAN_CLIENT_ID")
+    return Token(jwt, exp)
+
+
 @dataclass
 class Token:
     access_token: str
@@ -75,16 +89,22 @@ class DhanAuth:
     def __init__(self, http: httpx.AsyncClient, client_id: str, pin: str, totp_secret: str,
                  cache_path: str | Path | None, *, auth_url: str = "https://auth.dhan.co/app/generateAccessToken",
                  refresh_margin: timedelta = timedelta(hours=2),
-                 clock: Callable[[], float] = time.time):
+                 clock: Callable[[], float] = time.time, manual_token: str = ""):
         self.http, self.client_id, self._pin, self._secret = http, client_id, pin, totp_secret
         self.cache_path = Path(cache_path) if cache_path else None
         self.auth_url, self.refresh_margin, self.clock = auth_url, refresh_margin, clock
         self.token: Token | None = self._load()
         self._last_totp = ""
+        self._manual = manual_token
+        self._warned_manual = False
+        if manual_token:
+            t = token_from_jwt(manual_token, client_id)
+            if self.token is None or t.expiry > self.token.expiry:
+                self.token = t
 
     # -- secrets hygiene ----------------------------------------------------
     def secret_values(self) -> list[str]:
-        vals = [self.client_id, self._pin, self._secret, self._last_totp]
+        vals = [self.client_id, self._pin, self._secret, self._last_totp, self._manual]
         if self.token:
             vals.append(self.token.access_token)
         return vals
@@ -124,7 +144,13 @@ class DhanAuth:
     def needs_refresh(self) -> bool:
         return self.token is None or self.token.valid_for(self.now()) < self.refresh_margin
 
+    @property
+    def can_generate(self) -> bool:
+        return bool(self._pin and self._secret)
+
     async def generate(self) -> Token:
+        if not self.can_generate:
+            raise AuthError("cannot generate a Dhan token: DHAN_PIN and DHAN_TOTP_SECRET are not set")
         self._last_totp = totp(self._secret, self.clock())
         params = {"dhanClientId": self.client_id, "pin": self._pin, "totp": self._last_totp}
         try:
@@ -154,9 +180,19 @@ class DhanAuth:
         return self.now() + timedelta(hours=24)
 
     async def ensure(self) -> str:
-        """Return a usable access token, generating a new one if missing or near expiry."""
+        """Return a usable access token, generating a new one if missing or near expiry.
+        Without TOTP credentials, a pasted token is used until it expires."""
         if self.needs_refresh():
-            await self.generate()
+            if self.can_generate:
+                await self.generate()
+            elif self.token is not None and self.token.expiry > self.now():
+                if not self._warned_manual:
+                    self._warned_manual = True
+                    log.warning("Dhan token expires %s and cannot be renewed automatically "
+                                "(no DHAN_PIN/DHAN_TOTP_SECRET)", self.token.expiry.isoformat(timespec="minutes"))
+            else:
+                raise AuthError("Dhan access token expired or rejected; paste a new DHAN_ACCESS_TOKEN "
+                                "or set DHAN_PIN and DHAN_TOTP_SECRET for automatic refresh")
         return self.token.access_token
 
     def invalidate(self) -> None:

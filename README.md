@@ -25,6 +25,7 @@ cp .env.example .env   # then fill in the values below
 | `DHAN_CLIENT_ID` | Your Dhan client ID |
 | `DHAN_PIN` | Your 6-digit Dhan PIN |
 | `DHAN_TOTP_SECRET` | The base32 secret shown when you enable TOTP in Dhan (the text form of the QR code) |
+| `DHAN_ACCESS_TOKEN` | *Alternative* to PIN + TOTP: a token from web.dhan.co. Used until it expires (24 h) and not refreshed automatically |
 | `TELEGRAM_BOT_TOKEN` | From @BotFather |
 | `TELEGRAM_CHAT_ID` | Send the bot a message, then read `getUpdates` |
 

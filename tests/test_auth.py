@@ -113,3 +113,47 @@ async def test_rejected_token_is_regenerated_on_next_request(tmp_path):
         assert auth.token is None
         assert await dhan.ltp(ins) == {"RELIANCE": 2900.0}
     assert fake.token_n == 2
+
+
+def _jwt(client_id, exp):
+    import json as _j
+    enc = lambda d: base64.urlsafe_b64encode(_j.dumps(d).encode()).decode().rstrip("=")
+    return f"{enc({'alg': 'HS512'})}.{enc({'dhanClientId': client_id, 'exp': exp})}.sig"
+
+
+async def test_pasted_token_used_until_expiry_then_clear_error(tmp_path):
+    from newsalert.auth import token_from_jwt
+    clock = FakeClock(T)
+    exp = int((T + timedelta(hours=10)).timestamp())
+    jwt = _jwt(CLIENT_ID, exp)
+    assert token_from_jwt(jwt, CLIENT_ID).expiry == T + timedelta(hours=10)
+    fake = FakeDhan(clock)
+    http = fake.client()
+    auth = DhanAuth(http, CLIENT_ID, "", "", None, clock=clock, manual_token=jwt)
+    assert not auth.can_generate
+    async with http:
+        assert await auth.ensure() == jwt
+        clock.t += 9 * 3600                  # inside refresh margin, but can't refresh: keep using it
+        assert await auth.ensure() == jwt
+        clock.t += 2 * 3600                  # expired
+        with pytest.raises(AuthError, match="DHAN_ACCESS_TOKEN") as ei:
+            await auth.ensure()
+    assert jwt not in str(ei.value) and fake.auth_calls == []
+
+
+def test_pasted_token_for_other_client_rejected():
+    from newsalert.auth import token_from_jwt
+    with pytest.raises(AuthError, match="different client ID") as ei:
+        token_from_jwt(_jwt("999", 2_000_000_000), CLIENT_ID)
+    assert "999" not in str(ei.value)
+    with pytest.raises(AuthError):
+        token_from_jwt("not-a-jwt", CLIENT_ID)
+
+
+def test_pasted_token_is_redacted(tmp_path, caplog):
+    jwt = _jwt(CLIENT_ID, 2_000_000_000)
+    auth = DhanAuth(None, CLIENT_ID, "", "", None, clock=FakeClock(T), manual_token=jwt)
+    caplog.set_level(logging.INFO)
+    auth.install_redaction(logging.getLogger())
+    logging.getLogger("x").info("using %s", jwt)
+    assert jwt not in caplog.text

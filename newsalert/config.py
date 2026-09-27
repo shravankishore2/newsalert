@@ -17,6 +17,7 @@ class Secrets:
     dhan_client_id: str
     dhan_pin: str
     dhan_totp_secret: str
+    dhan_access_token: str
     telegram_bot_token: str
     telegram_chat_id: str
 
@@ -46,6 +47,7 @@ def load_secrets(env_file: str | Path = ".env") -> Secrets:
         dhan_client_id=os.getenv("DHAN_CLIENT_ID", ""),
         dhan_pin=os.getenv("DHAN_PIN", ""),
         dhan_totp_secret=os.getenv("DHAN_TOTP_SECRET", ""),
+        dhan_access_token=os.getenv("DHAN_ACCESS_TOKEN", ""),
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
         telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
     )

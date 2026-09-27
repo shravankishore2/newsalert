@@ -45,10 +45,21 @@ def _require(sec: Secrets, *names: str) -> None:
         raise SystemExit(f"missing in .env: {', '.join(missing)}")
 
 
+def _require_dhan(sec: Secrets) -> None:
+    """Client ID plus either a pasted access token or TOTP credentials."""
+    _require(sec, "dhan_client_id")
+    if not sec.dhan_access_token and sec.missing("dhan_pin", "dhan_totp_secret"):
+        raise SystemExit("missing in .env: DHAN_ACCESS_TOKEN, or DHAN_PIN and DHAN_TOTP_SECRET")
+
+
 def _auth(http: httpx.AsyncClient, cfg: dict, sec: Secrets) -> DhanAuth:
     d = cfg["dhan"]
-    auth = DhanAuth(http, sec.dhan_client_id, sec.dhan_pin, sec.dhan_totp_secret, cfg["token_cache_path"],
-                    auth_url=d["auth_url"], refresh_margin=timedelta(hours=d["token_refresh_margin_h"]))
+    try:
+        auth = DhanAuth(http, sec.dhan_client_id, sec.dhan_pin, sec.dhan_totp_secret, cfg["token_cache_path"],
+                        auth_url=d["auth_url"], refresh_margin=timedelta(hours=d["token_refresh_margin_h"]),
+                        manual_token=sec.dhan_access_token)
+    except AuthError as e:
+        raise SystemExit(str(e)) from None
     auth.install_redaction()
     return auth
 
@@ -73,22 +84,28 @@ def cmd_build_universe(args, cfg) -> int:
 
 async def cmd_token(args, cfg) -> int:
     sec = load_secrets()
-    _require(sec, "dhan_client_id", "dhan_pin", "dhan_totp_secret")
+    _require_dhan(sec)
     async with httpx.AsyncClient(timeout=cfg["dhan"]["timeout_s"]) as http:
         auth = _auth(http, cfg, sec)
         try:
-            tok = await auth.generate() if args.force or auth.needs_refresh() else auth.token
+            if auth.can_generate and (args.force or auth.needs_refresh()):
+                tok = await auth.generate()
+            else:
+                await auth.ensure()
+                tok = auth.token
         except AuthError as e:
             print(f"FAIL: {e}", file=sys.stderr)
             return 1
-    print(f"token valid until {tok.expiry.isoformat(timespec='minutes')} (cached in {cfg['token_cache_path']})")
+    how = "auto-refresh via TOTP" if auth.can_generate else "pasted token; no auto-refresh without DHAN_PIN/DHAN_TOTP_SECRET"
+    print(f"token valid until {tok.expiry.isoformat(timespec='minutes')} ({how})")
     return 0
 
 
 async def cmd_live(args, cfg) -> int:
     from .live import LiveMonitor
     sec = load_secrets()
-    _require(sec, "dhan_client_id", "dhan_pin", "dhan_totp_secret", "telegram_bot_token", "telegram_chat_id")
+    _require_dhan(sec)
+    _require(sec, "telegram_bot_token", "telegram_chat_id")
     store = Store(cfg["db_path"])
     index = _index(cfg)
     async with httpx.AsyncClient(timeout=cfg["dhan"]["timeout_s"]) as http:
@@ -110,7 +127,8 @@ async def cmd_live(args, cfg) -> int:
 async def cmd_smoke_test(args, cfg) -> int:
     """Exercise every external dependency once (token, LTP, history, feeds, Telegram)."""
     sec = load_secrets()
-    _require(sec, "dhan_client_id", "dhan_pin", "dhan_totp_secret", "telegram_bot_token", "telegram_chat_id")
+    _require_dhan(sec)
+    _require(sec, "telegram_bot_token", "telegram_chat_id")
     ok, lines = True, [f"newsalert smoke test {datetime.now(IST):%Y-%m-%d %H:%M IST}"]
     tickers = _tickers(cfg, args.symbol)
     async with httpx.AsyncClient(timeout=cfg["dhan"]["timeout_s"]) as http:
@@ -148,7 +166,7 @@ async def cmd_smoke_test(args, cfg) -> int:
 async def cmd_fetch_history(args, cfg) -> int:
     from .history import fetch_history
     sec = load_secrets()
-    _require(sec, "dhan_client_id", "dhan_pin", "dhan_totp_secret")
+    _require_dhan(sec)
     ins = [_index(cfg)] + [Instrument(t.symbol, t.security_id, "NSE_EQ", "EQUITY")
                            for t in _tickers(cfg, args.tickers)]
     store = Store(cfg["history_db_path"])
