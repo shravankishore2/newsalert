@@ -5,3 +5,7 @@ __pycache__/
 .pytest_cache/
 data/
 *.egg-info/
+
+# local project notes (never committed)
+CLAUDE.md
+TASKS.md
