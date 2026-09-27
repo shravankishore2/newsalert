@@ -1,4 +1,4 @@
-# Fresh 24 h Dhan token before the session (08:45 IST), so the 09:10 monitor never starts on a
+# Fresh 24 h Dhan token before the session (08:30 IST, ahead of the monitor's own 08:45 pre-open check), so the 09:10 monitor never starts on a
 # token that could expire mid-session. The monitor's own ExecStartPre=token is the second chance.
 [Unit]
 Description=newsalert Dhan token refresh (pre-open)
