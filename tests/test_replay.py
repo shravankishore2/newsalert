@@ -94,3 +94,16 @@ def test_shipped_results_keep_us_section_and_numbers():
     text = open("docs/RESULTS.md").read()
     assert "<!-- results:us:start -->" in text and "<!-- results:us:end -->" in text
     assert "761/2715 = 28.0%" in text and "637/2402 = 26.5%" in text
+
+
+def test_session_filter_drops_out_of_hours_bars():
+    s = Store(":memory:")
+    day = 1_790_000_000 - (1_790_000_000 + 19800) % 86400      # 00:00 IST
+    s.insert_bars([("X", day + 9 * 3600 + 900, 1.0),              # 09:15 IST: in
+                   ("X", day + 15 * 3600 + 1740, 2.0),            # 15:29: in
+                   ("X", day + 15 * 3600 + 2280, 3.0),            # 15:38: out
+                   ("X", day + 9 * 3600, 4.0)])                   # 09:00: out
+    sess = (19800, 9 * 3600 + 900, 15 * 3600 + 1800)
+    assert [p for _, _, p in s.iter_bars("bars", "IDX", sess)] == [1.0, 2.0]
+    assert [p for _, p in s.prices_between("bars", "X", day, day + 86400, sess)] == [1.0, 2.0]
+    assert len(list(s.iter_bars("bars", "IDX"))) == 4

@@ -27,7 +27,7 @@ MAX_GAP_SLEEP_S = 3.0   # overnight/weekend gaps are compressed to at most this 
 
 class DemoDriver:
     def __init__(self, *, history_db: str, demo_db: str, dataset: dict, alerts_cfg: dict,
-                 speed: float = 60, warm_days: int = 1,
+                 speed: float = 60, warm_days: int = 1, session: tuple[int, int, int] | None = None,
                  sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
                  clock: Callable[[], float] = time.time):
         self.history = Store(history_db)
@@ -39,6 +39,7 @@ class DemoDriver:
         self.index = dataset["index_symbol"]
         self.engine = Engine(Params.from_config(alerts_cfg), self.index)
         self.sleep, self.clock = sleep, clock
+        self.session = session  # same out-of-hours filter as `replay`, so demo shows what was measured
         self.run_id = "demo-" + uuid.uuid4().hex[:8]
         self.sim_ts: int | None = None
         self.market_open = False
@@ -73,7 +74,7 @@ class DemoDriver:
 
     def _minutes(self):
         cur_ts, group = None, []
-        for symbol, ts, price in self.history.iter_bars("bars", self.index):
+        for symbol, ts, price in self.history.iter_bars("bars", self.index, self.session):
             if ts != cur_ts and group:
                 yield cur_ts, group
                 group = []
@@ -121,4 +122,4 @@ class DemoDriver:
     def prices(self, symbol: str, start: int, end: int) -> list[tuple[int, float]]:
         if self.sim_ts is not None:
             end = min(end, self.sim_ts)   # never show "future" prices during the replay
-        return self.history.prices_between("bars", symbol, start - 1, end)
+        return self.history.prices_between("bars", symbol, start - 1, end, self.session)

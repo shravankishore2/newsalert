@@ -249,7 +249,8 @@ def cmd_demo(args, cfg) -> int:
     sec = load_secrets()
     driver = DemoDriver(history_db=ds["history_db"], demo_db=cfg["demo"]["db_path"], dataset=ds,
                         alerts_cfg=cfg["alerts"], speed=args.speed or cfg["demo"]["speed"],
-                        warm_days=cfg["demo"]["warm_days"] if args.warm_days is None else args.warm_days)
+                        warm_days=cfg["demo"]["warm_days"] if args.warm_days is None else args.warm_days,
+                        session=_nse_session(cfg) if name == "nse" else None)
     info = SiteInfo(mode="demo", dataset=ds["label"], index_name=ds["index_name"], index_symbol=ds["index_symbol"],
                     currency=ds["currency"], timezone=ds["timezone"],
                     tickers=_ticker_info(ds["tickers_file"], ds["sector_column"]), params=_alert_params(cfg))
@@ -271,6 +272,39 @@ def _has_bars(path: str) -> bool:
         return False
 
 
+def _nse_session(cfg: dict) -> tuple[int, int, int] | None:
+    """(UTC offset, open, close) in seconds for the fixed-offset NSE session; None elsewhere."""
+    m = cfg["market"]
+    if m["timezone"] != "Asia/Kolkata":
+        return None
+    hm = lambda t: int(t[:2]) * 3600 + int(t[3:5]) * 60
+    return (5 * 3600 + 1800, hm(m["open"]), hm(m["close"]))
+
+
+def _data_gaps(src: Store, index: str, session: tuple[int, int, int]) -> list[str]:
+    """Measured gaps in the stored bars, stated in RESULTS.md rather than hidden."""
+    off, o, c = session
+    out_of_hours = src.conn.execute(
+        "SELECT COUNT(*) FROM bars WHERE ((ts+?)%86400) < ? OR ((ts+?)%86400) >= ?", (off, o, off, c)).fetchone()[0]
+    short = src.conn.execute(
+        """SELECT COUNT(*), SUM(last < ?), MIN(CASE WHEN last < ? THEN d END) FROM (
+             SELECT symbol, date(ts+?, 'unixepoch') d, MAX((ts+?)%86400) last FROM bars
+             WHERE symbol != ? AND ((ts+?)%86400) >= ? AND ((ts+?)%86400) < ? GROUP BY symbol, d)""",
+        (c - 60, c - 60, off, off, index, off, o, off, c)).fetchone()
+    notes = []
+    if short[1]:
+        notes.append(f"Dhan's 1-minute stock history ends before 15:29 IST on {short[1]:,} of {short[0]:,} "
+                     f"stock-days ({short[1] / short[0]:.1%}), all from {short[2]} on; the missing minutes are "
+                     "the end of the session (most such days stop at 15:14). NIFTY 50 bars are complete. Alerts "
+                     "whose 30-minute follow-up falls into that gap are counted as not evaluable and left out, so "
+                     "late-session alerts are under-represented in the rate (whether they differ was not measured). "
+                     "Live LTP polling is not affected.")
+    if out_of_hours:
+        notes.append(f"{out_of_hours:,} bars stamped outside 09:15-15:30 IST were dropped, as live mode "
+                     "only polls during the session.")
+    return notes
+
+
 def cmd_replay(args, cfg) -> int:
     from .replay import render_results, replay, write_results
     table = "bars" if args.source == "history" else "quotes"
@@ -282,7 +316,8 @@ def cmd_replay(args, cfg) -> int:
     sink = Store(args.replay_db)
     index = cfg["index"]["symbol"]
     t0 = time.monotonic()
-    run_id, results = replay(src, table, cfg["alerts"], cfg["replay"], index, sink)
+    session = _nse_session(cfg)
+    run_id, results = replay(src, table, cfg["alerts"], cfg["replay"], index, sink, session)
     elapsed = time.monotonic() - t0
     live = Store(cfg["db_path"])
     desc = ("Dhan intraday 1-minute bars (`/v2/charts/intraday`)" if table == "bars"
@@ -294,7 +329,8 @@ def cmd_replay(args, cfg) -> int:
         generated=datetime.now(timezone.utc), run_id=run_id, elapsed_s=elapsed, tz=IST, index_name="NIFTY 50",
         caveats=["Live mode checks every ticker once per 60 s cycle with one batched Dhan LTP request, the "
                  "same cadence as the 1-minute bars used here, so the filters behave as measured. LTP "
-                 "has no trade timestamp; live samples are stamped when the reply is received."])
+                 "has no trade timestamp; live samples are stamped when the reply is received."]
+                + (_data_gaps(src, index, session) if session and table == "bars" else []))
     write_results(args.out, "nse", text)
     for v, r in results.items():
         print(f"{v}: {len(r.alerts)} alerts, {r.evaluable} evaluable, {r.false} false")

@@ -168,7 +168,8 @@ def test_status_and_results(env):
     st = client.get("/api/status").json()
     assert st["mode"] == "demo" and st["market"]["open"] and st["cycle"]["value"]["ok"] == 501
     sections = {s["key"]: s for s in client.get("/api/results").json()["sections"]}
-    assert not sections["nse"]["has_numbers"]
+    nse = sections["nse"]["false_alert_rows"]
+    assert [(r["false"], r["n"], r["rate"]) for r in nse] == [(2496, 9555, 26.1), (2050, 8190, 25.0)]
     us = sections["us"]["false_alert_rows"]
     assert [(r["variant"], r["false"], r["n"], r["rate"]) for r in us] == [
         ("Without filters", 761, 2715, 28.0), ("With MA + correlation filters", 637, 2402, 26.5)]

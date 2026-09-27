@@ -83,11 +83,11 @@ class NullSender:
 
 
 def run_variant(source: Store, table: str, params: Params, index_symbol: str,
-                sink: Store, run_id: str, variant: str) -> tuple[list[Alert], list[float]]:
+                sink: Store, run_id: str, variant: str, session: tuple[int, int, int] | None = None) -> tuple[list[Alert], list[float]]:
     engine = Engine(params, index_symbol)
     sender = NullSender()
     alerts, lat = [], []
-    for symbol, ts, price in source.iter_bars(table, index_symbol):
+    for symbol, ts, price in source.iter_bars(table, index_symbol, session):
         received = time.perf_counter_ns()
         a = engine.on_price(symbol, ts, price)
         if a is None:
@@ -102,17 +102,18 @@ def run_variant(source: Store, table: str, params: Params, index_symbol: str,
 
 
 def replay(source: Store, table: str, alerts_cfg: dict, replay_cfg: dict, index_symbol: str,
-           sink: Store) -> tuple[str, dict[str, VariantResult]]:
+           sink: Store, session: tuple[int, int, int] | None = None) -> tuple[str, dict[str, VariantResult]]:
+    """`session` drops bars outside market hours, matching live mode, which only polls in session."""
     run_id = "replay-" + uuid.uuid4().hex[:8]
     window_s = int(60 * replay_cfg["false_alert_window_min"])
     max_gap_s = int(60 * alerts_cfg["max_ref_staleness_min"])
     out = {}
     for variant, filters in (("unfiltered", False), ("filtered", True)):
         params = Params.from_config(alerts_cfg, filters=filters)
-        alerts, lat = run_variant(source, table, params, index_symbol, sink, run_id, variant)
+        alerts, lat = run_variant(source, table, params, index_symbol, sink, run_id, variant, session)
         verdicts = {}
         for a in alerts:
-            fwd = source.prices_between(table, a.symbol, a.ts, a.ts + window_s)
+            fwd = source.prices_between(table, a.symbol, a.ts, a.ts + window_s, session)
             verdicts[(a.symbol, a.ts)] = classify(a, fwd, window_s, replay_cfg["reversal_frac"], max_gap_s)
         out[variant] = VariantResult(variant, alerts, lat, verdicts)
     return run_id, out

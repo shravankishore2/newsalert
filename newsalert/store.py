@@ -136,18 +136,31 @@ class Store:
         self.conn.executemany("INSERT OR REPLACE INTO bars VALUES (?,?,?)", rows)
         self.conn.commit()
 
-    def iter_bars(self, table: str, index_symbol: str) -> Iterator[tuple[str, int, float]]:
+    @staticmethod
+    def _session_sql(session: tuple[int, int, int] | None) -> tuple[str, tuple]:
+        """session = (utc_offset_s, open_s, close_s): keep rows whose local time-of-day is in
+        [open, close). Only for fixed-offset markets (IST has no DST)."""
+        if session is None:
+            return "", ()
+        off, o, c = session
+        return " AND ((ts + ?) % 86400) >= ? AND ((ts + ?) % 86400) < ?", (off, o, off, c)
+
+    def iter_bars(self, table: str, index_symbol: str,
+                  session: tuple[int, int, int] | None = None) -> Iterator[tuple[str, int, float]]:
         """All rows ordered by time, index symbol first within each timestamp."""
         col = "close" if table == "bars" else "price"
+        where, args = self._session_sql(session)
         yield from self.conn.execute(
-            f"SELECT symbol, ts, {col} FROM {table} "
-            "ORDER BY ts, CASE WHEN symbol=? THEN 0 ELSE 1 END, symbol", (index_symbol,))
+            f"SELECT symbol, ts, {col} FROM {table} WHERE 1=1{where} "
+            "ORDER BY ts, CASE WHEN symbol=? THEN 0 ELSE 1 END, symbol", (*args, index_symbol))
 
-    def prices_between(self, table: str, symbol: str, start: int, end: int) -> list[tuple[int, float]]:
+    def prices_between(self, table: str, symbol: str, start: int, end: int,
+                       session: tuple[int, int, int] | None = None) -> list[tuple[int, float]]:
         col = "close" if table == "bars" else "price"
+        where, args = self._session_sql(session)
         return self.conn.execute(
-            f"SELECT ts, {col} FROM {table} WHERE symbol=? AND ts>? AND ts<=? ORDER BY ts",
-            (symbol, start, end)).fetchall()
+            f"SELECT ts, {col} FROM {table} WHERE symbol=? AND ts>? AND ts<=?{where} ORDER BY ts",
+            (symbol, start, end, *args)).fetchall()
 
     def trading_days(self, table: str) -> int:
         return self.conn.execute(f"SELECT COUNT(DISTINCT date(ts, 'unixepoch')) FROM {table}").fetchone()[0]

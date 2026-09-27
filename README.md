@@ -306,15 +306,25 @@ removed ("Reliance Industries Ltd." → "Reliance Industries"), on word boundari
 
 See [`docs/RESULTS.md`](docs/RESULTS.md).
 
-- **NSE: not run yet.** It needs Dhan credentials and a Data API subscription; see
-  *Setup*. The NSE section of RESULTS.md says so and has no numbers.
-- **US** (kept from the original build): replay over 19 trading days (2026-08-31 to
-  2026-09-25), 503 tickers + SPY, 3.52M one-minute bars:
+Both markets use the same false-alert definition (price gives back more than half the
+move within 30 minutes) and the same filter settings; nothing was retuned for NSE.
 
-| | Alerts | False-alert rate (reverses > 50% within 30 min) |
-|---|---:|---|
-| Without filters | 2780 | 28.0% (95% CI 26.4–29.7%, n = 2715) |
-| With MA + correlation filters | 2453 | 26.5% (95% CI 24.8–28.3%, n = 2402) |
+| Market | Data | Without filters | With MA + correlation filters |
+|---|---|---|---|
+| **NSE** | 63 trading days (2026-06-30 to 2026-09-25), 500 stocks + NIFTY 50, 11.7M Dhan 1-min bars | 26.1% (95% CI 25.3–27.0%, n = 9,555; 10,120 alerts) | 25.0% (95% CI 24.1–26.0%, n = 8,190; 8,631 alerts) |
+| **US** (original build) | 19 trading days (2026-08-31 to 2026-09-25), 503 stocks + SPY, 3.52M Yahoo 1-min bars | 28.0% (95% CI 26.4–29.7%, n = 2,715; 2,780 alerts) | 26.5% (95% CI 24.8–28.3%, n = 2,402; 2,453 alerts) |
+
+In both markets the filters reject roughly 12–14% of alerts, and those are clearly
+worse. On NSE, rejected alerts were 32.7% false (CI 30.2–35.2%) against 25.0% for kept
+ones; the US figures were 39.6% vs 26.5%. Because they remove so few, the overall
+false-alert rate drops only about 1–1.5 points, and the two confidence intervals
+overlap in both markets.
+
+The NSE data has a known gap. From 2026-08-03, about 210 stocks' Dhan histories stop
+at 15:14 instead of 15:29 (26% of stock-days overall). Alerts whose 30-minute follow-up
+falls into that gap are left out of the rate, so late-session alerts are
+under-represented. Whether they behave differently wasn't measured. RESULTS.md states
+this, along with the 7,914 out-of-hours bars dropped.
 
 ## Known limits
 
@@ -322,6 +332,9 @@ See [`docs/RESULTS.md`](docs/RESULTS.md).
 - The 30-sample warm-up means the first ~30 minutes after a fresh start produce no
   alerts. At a 60 s cycle that's half an hour; it doesn't carry over between restarts.
 - Holiday list is static and needs a yearly update; Muhurat sessions are not modelled.
-- The Dhan timestamp convention for intraday bars ("Epoch timestamp" in the docs) hasn't
-  been checked against real data yet. `fetch-history` checks that bars fall inside
+- Dhan intraday timestamps are true UTC epoch seconds. This was checked on real data:
+  bars start at 09:15 IST. `fetch-history` still checks that bars fall inside
   09:15–15:30 IST and exits non-zero if they don't.
+- Dhan's stock history misses the last 15 minutes of the session for about 210 stocks
+  from 2026-08-03 on, and has a few bars stamped after the close. Replay and demo drop
+  out-of-session bars, the same as live mode.
