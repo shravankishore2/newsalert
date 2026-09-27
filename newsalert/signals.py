@@ -69,6 +69,11 @@ class Alert:
     index_move: float | None = None
     corr: float | None = None
     beta: float | None = None
+    # Why the alert passed (None when that filter was disabled):
+    fast_sma: float | None = None       # MA filter: fast SMA now
+    slow_sma: float | None = None       # MA filter: slow SMA now
+    fast_move: float | None = None      # MA filter: fast SMA now vs at the reference time
+    residual: float | None = None       # corr filter: move - beta * index move (if corr >= min_corr)
 
 
 class Series:
@@ -183,6 +188,7 @@ class Engine:
         if last is not None and ts - last < 60 * p.cooldown_min:
             return None
 
+        fast = slow = fast_move = residual = None
         if p.ma_enabled:
             fast_s, slow_s = 60 * p.ma_fast_min, 60 * p.ma_slow_min
             fast = s.mean_between(ts - fast_s, ts)
@@ -192,7 +198,8 @@ class Engine:
                 return self._reject(symbol, ts)
             # The fast SMA itself must have moved, measured SMA-to-SMA so a single bad
             # print at either end (current price or reference price) can't pass.
-            if direction * (fast / fast_at_ref - 1) < p.ma_confirm_frac * p.move_threshold:
+            fast_move = fast / fast_at_ref - 1
+            if direction * fast_move < p.ma_confirm_frac * p.move_threshold:
                 return self._reject(symbol, ts)
 
         index_move = corr = beta = None
@@ -216,4 +223,5 @@ class Engine:
                         return self._reject(symbol, ts)
 
         self.last_alert[symbol] = ts
-        return Alert(symbol, ts, direction, move, ref_ts, ref, price, index_move, corr, beta)
+        return Alert(symbol, ts, direction, move, ref_ts, ref, price, index_move, corr, beta,
+                     fast, slow, fast_move, residual)

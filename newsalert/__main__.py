@@ -1,9 +1,10 @@
-"""CLI: python -m newsalert {build-universe,token,live,smoke-test,fetch-history,replay}"""
+"""CLI: python -m newsalert {build-universe,token,live,serve,demo,smoke-test,fetch-history,replay}"""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import logging
 import sys
 import time
@@ -13,7 +14,7 @@ from pathlib import Path
 import httpx
 
 from .auth import AuthError, DhanAuth
-from .clients import DhanClient, FetchError, Instrument, RssFeed, TelegramClient, match_news
+from .clients import DhanClient, FetchError, Instrument, RssFeed
 from .config import Secrets, Ticker, load_config, load_secrets, load_tickers
 from .market import IST, MarketCalendar
 from .ratelimit import RateLimiter
@@ -105,7 +106,6 @@ async def cmd_live(args, cfg) -> int:
     from .live import LiveMonitor
     sec = load_secrets()
     _require_dhan(sec)
-    _require(sec, "telegram_bot_token", "telegram_chat_id")
     store = Store(cfg["db_path"])
     index = _index(cfg)
     async with httpx.AsyncClient(timeout=cfg["dhan"]["timeout_s"]) as http:
@@ -114,9 +114,7 @@ async def cmd_live(args, cfg) -> int:
         mon = LiveMonitor(
             tickers=_tickers(cfg, args.tickers), index=index,
             engine=Engine(Params.from_config(cfg["alerts"]), index.symbol), dhan=_dhan(http, cfg, auth),
-            auth=auth, telegram=TelegramClient(http, sec.telegram_bot_token, sec.telegram_chat_id,
-                                               cfg["telegram"]["base_url"]),
-            feeds=feeds, store=store, calendar=MarketCalendar.from_config(cfg["market"]),
+            auth=auth, feeds=feeds, store=store, calendar=MarketCalendar.from_config(cfg["market"]),
             cycle_s=cfg["dhan"]["cycle_s"], token_refresh_lead_min=cfg["dhan"]["token_refresh_lead_min"])
         stop = datetime.now(timezone.utc) + timedelta(minutes=args.minutes) if args.minutes else None
         await mon.run(max_cycles=args.cycles, stop_after=stop)
@@ -125,10 +123,9 @@ async def cmd_live(args, cfg) -> int:
 
 
 async def cmd_smoke_test(args, cfg) -> int:
-    """Exercise every external dependency once (token, LTP, history, feeds, Telegram)."""
+    """Exercise every external dependency once (token, LTP, history, feeds)."""
     sec = load_secrets()
     _require_dhan(sec)
-    _require(sec, "telegram_bot_token", "telegram_chat_id")
     ok, lines = True, [f"newsalert smoke test {datetime.now(IST):%Y-%m-%d %H:%M IST}"]
     tickers = _tickers(cfg, args.symbol)
     async with httpx.AsyncClient(timeout=cfg["dhan"]["timeout_s"]) as http:
@@ -150,16 +147,7 @@ async def cmd_smoke_test(args, cfg) -> int:
             except (FetchError, AuthError) as e:
                 ok = False
                 lines.append(f"FAIL {label}: {e}")
-        text = "\n".join(lines)
-        print(text)
-        try:
-            t0 = time.perf_counter()
-            await TelegramClient(http, sec.telegram_bot_token, sec.telegram_chat_id,
-                                 cfg["telegram"]["base_url"]).send(text)
-            print(f"OK telegram send ({(time.perf_counter() - t0) * 1000:.0f} ms)")
-        except FetchError as e:
-            ok = False
-            print(f"FAIL telegram: {e}")
+        print("\n".join(lines))
     return 0 if ok else 1
 
 
@@ -183,6 +171,104 @@ async def cmd_fetch_history(args, cfg) -> int:
               f"{len(report['out_of_session'])} instruments, e.g. {list(report['out_of_session'].items())[:5]}")
         return 1
     return 0
+
+
+def _ticker_info(path: str, sector_col: str) -> dict[str, dict]:
+    import csv
+    with open(path, newline="") as f:
+        return {r["symbol"]: {"name": r.get("name", ""), "sector": r.get(sector_col, "")} for r in csv.DictReader(f)}
+
+
+def _alert_params(cfg: dict) -> dict:
+    a = cfg["alerts"]
+    return {"move_threshold": a["move_threshold"], "move_window_min": a["move_window_min"],
+            "ma_fast_min": a["ma_filter"]["fast_min"], "ma_slow_min": a["ma_filter"]["slow_min"],
+            "ma_confirm_frac": a["ma_filter"]["confirm_frac"], "corr_min": a["corr_filter"]["min_corr"],
+            "corr_returns": a["corr_filter"]["returns"], "cooldown_min": a["cooldown_min"]}
+
+
+def _password(sec: Secrets, allow_generated: bool) -> str:
+    if sec.dashboard_password:
+        return sec.dashboard_password
+    if not allow_generated:
+        raise SystemExit("missing in .env: DASHBOARD_PASSWORD (the dashboard is never served without one)")
+    import secrets as _s
+    pw = _s.token_urlsafe(9)
+    print(f"DASHBOARD_PASSWORD not set; this demo run's password is: {pw}", flush=True)
+    return pw
+
+
+def _serve(app, cfg: dict, args) -> int:
+    import uvicorn
+    d = cfg["dashboard"]
+    host, port = args.host or d["host"], args.port or d["port"]
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        log.warning("serving on %s: anyone who can reach this address sees the login page", host)
+    print(f"dashboard: http://{'127.0.0.1' if host in ('0.0.0.0', '::') else host}:{port}/", flush=True)
+    uvicorn.run(app, host=host, port=port, log_level="warning")
+    return 0
+
+
+def cmd_serve(args, cfg) -> int:
+    """Dashboard over live data (run `live` alongside it, in another terminal)."""
+    from .web.app import SiteInfo, create_app
+    sec = load_secrets()
+    store = Store(cfg["db_path"])  # creates tables so the dashboard can start before the first alert
+    store.close()
+    cal = MarketCalendar.from_config(cfg["market"])
+    info = SiteInfo(mode="live", dataset="NSE Nifty 500 (live Dhan LTP)", index_name=cfg["index"]["name"],
+                    index_symbol=cfg["index"]["symbol"], currency="₹", timezone=cfg["market"]["timezone"],
+                    tickers=_ticker_info(cfg["tickers_file"], "industry"), params=_alert_params(cfg))
+    quotes = Store(cfg["db_path"])
+
+    def market() -> dict:
+        now = datetime.now(timezone.utc)
+        nxt = cal.next_open(now)
+        return {"open": cal.is_open(now), "now_ts": now.timestamp(), "simulated": False,
+                "next_open": nxt.isoformat() if nxt > now else None, "timezone": cfg["market"]["timezone"]}
+
+    app = create_app(db_path=cfg["db_path"], info=info, password=_password(sec, False),
+                     prices=lambda s, a, b: quotes.prices_between("quotes", s, a - 1, b), market=market,
+                     push_poll_s=cfg["dashboard"]["push_poll_s"], session_hours=cfg["dashboard"]["session_hours"])
+    return _serve(app, cfg, args)
+
+
+def cmd_demo(args, cfg) -> int:
+    """Dashboard driven by replayed history, clearly labelled as replay data."""
+    from .demo import DemoDriver
+    from .web.app import SiteInfo, create_app
+    datasets = cfg["demo"]["datasets"]
+    name = args.dataset
+    if name == "auto":
+        name = next((k for k in ("nse", "us") if _has_bars(datasets[k]["history_db"])), None)
+        if name is None:
+            raise SystemExit("no replay data: run `fetch-history` (NSE) or place the US bars in data/history_us.db")
+    ds = datasets[name]
+    if not _has_bars(ds["history_db"]):
+        raise SystemExit(f"dataset {name!r} has no bars in {ds['history_db']}")
+    sec = load_secrets()
+    driver = DemoDriver(history_db=ds["history_db"], demo_db=cfg["demo"]["db_path"], dataset=ds,
+                        alerts_cfg=cfg["alerts"], speed=args.speed or cfg["demo"]["speed"],
+                        warm_days=cfg["demo"]["warm_days"] if args.warm_days is None else args.warm_days)
+    info = SiteInfo(mode="demo", dataset=ds["label"], index_name=ds["index_name"], index_symbol=ds["index_symbol"],
+                    currency=ds["currency"], timezone=ds["timezone"],
+                    tickers=_ticker_info(ds["tickers_file"], ds["sector_column"]), params=_alert_params(cfg))
+    app = create_app(db_path=cfg["demo"]["db_path"], info=info, password=_password(sec, True),
+                     prices=driver.prices, market=driver.market_state, background=driver.run,
+                     push_poll_s=cfg["dashboard"]["push_poll_s"], session_hours=cfg["dashboard"]["session_hours"])
+    print(f"demo: replaying {ds['label']} at {driver.speed:g}x", flush=True)
+    return _serve(app, cfg, args)
+
+
+def _has_bars(path: str) -> bool:
+    import sqlite3
+    if not Path(path).exists():
+        return False
+    try:
+        with contextlib.closing(sqlite3.connect(f"file:{path}?mode=ro", uri=True)) as c:
+            return c.execute("SELECT 1 FROM bars LIMIT 1").fetchone() is not None
+    except sqlite3.Error:
+        return False
 
 
 def cmd_replay(args, cfg) -> int:
@@ -229,7 +315,16 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--tickers", help="comma-separated subset, e.g. RELIANCE,TCS,INFY")
     p.add_argument("--cycles", type=int, help="stop after N polling cycles")
     p.add_argument("--minutes", type=float, help="stop after N minutes")
-    p = sub.add_parser("smoke-test", help="check Dhan token, LTP, history, feeds and Telegram once")
+    p = sub.add_parser("serve", help="dashboard over live data (run `live` alongside)")
+    p.add_argument("--host")
+    p.add_argument("--port", type=int)
+    p = sub.add_parser("demo", help="dashboard driven by replayed history; no credentials needed")
+    p.add_argument("--dataset", choices=["auto", "nse", "us"], default="auto")
+    p.add_argument("--speed", type=float, help="replayed market minutes per real minute (default 60)")
+    p.add_argument("--warm-days", type=int, help="days replayed instantly before pacing starts")
+    p.add_argument("--host")
+    p.add_argument("--port", type=int)
+    p = sub.add_parser("smoke-test", help="check Dhan token, LTP, history and news feeds once")
     p.add_argument("--symbol", default="RELIANCE")
     p = sub.add_parser("fetch-history", help="download 1-minute bars from Dhan for replay")
     p.add_argument("--tickers")
@@ -250,6 +345,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_build_universe(args, cfg)
     if args.cmd == "replay":
         return cmd_replay(args, cfg)
+    if args.cmd == "serve":
+        return cmd_serve(args, cfg)
+    if args.cmd == "demo":
+        return cmd_demo(args, cfg)
     handler = {"token": cmd_token, "live": cmd_live, "smoke-test": cmd_smoke_test,
                "fetch-history": cmd_fetch_history}[args.cmd]
     return asyncio.run(handler(args, cfg))

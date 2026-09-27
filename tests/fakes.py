@@ -1,4 +1,4 @@
-"""Shared offline fakes: a fake clock and an in-memory Dhan/Telegram/RSS server."""
+"""Shared offline fakes: a fake clock and an in-memory Dhan/RSS server."""
 
 import json
 from datetime import datetime
@@ -28,7 +28,7 @@ class FakeClock:
 
 
 class FakeDhan:
-    """Serves Dhan auth, LTP, intraday, Telegram and RSS from memory, and records calls."""
+    """Serves Dhan auth, LTP, intraday and RSS from memory, and records calls."""
 
     def __init__(self, clock=None):
         self.clock = clock
@@ -40,7 +40,6 @@ class FakeDhan:
         self.ltp_calls: list[dict] = []
         self.ltp_at: list[float] = []   # clock time of each LTP request
         self.auth_calls: list[dict] = []
-        self.sent: list[dict] = []
         self.intraday: dict[str, dict] = {}
         self.intraday_calls: list[dict] = []
         self.rss: dict[str, bytes] = {}
@@ -61,9 +60,6 @@ class FakeDhan:
             exp = datetime.fromtimestamp((now or 0) + 86400, IST).replace(tzinfo=None)
             return httpx.Response(200, json={"dhanClientId": CLIENT_ID, "accessToken": self.token(),
                                              "expiryTime": exp.isoformat(timespec="milliseconds")})
-        if req.url.host == "api.telegram.org":
-            self.sent.append(json.loads(req.content))
-            return httpx.Response(200, json={"ok": True, "result": {"message_id": len(self.sent)}})
         if url in self.rss:
             self.rss_calls.append(url)
             return httpx.Response(200, content=self.rss[url], headers={"content-type": "application/xml"})

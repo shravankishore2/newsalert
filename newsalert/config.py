@@ -18,8 +18,7 @@ class Secrets:
     dhan_pin: str
     dhan_totp_secret: str
     dhan_access_token: str
-    telegram_bot_token: str
-    telegram_chat_id: str
+    dashboard_password: str
 
     def missing(self, *names: str) -> list[str]:
         """Env-var names (e.g. DHAN_PIN) of the given fields that are empty."""
@@ -48,8 +47,7 @@ def load_secrets(env_file: str | Path = ".env") -> Secrets:
         dhan_pin=os.getenv("DHAN_PIN", ""),
         dhan_totp_secret=os.getenv("DHAN_TOTP_SECRET", ""),
         dhan_access_token=os.getenv("DHAN_ACCESS_TOKEN", ""),
-        telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
-        telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),
+        dashboard_password=os.getenv("DASHBOARD_PASSWORD", ""),
     )
 
 

@@ -68,9 +68,37 @@ news:
     - name: BusinessLine companies
       url: https://www.thehindubusinessline.com/companies/feeder/default.rss
 
-telegram:
-  base_url: https://api.telegram.org
-  timeout_s: 10
+dashboard:
+  host: 127.0.0.1            # local only; the news licences don't allow public republishing
+  port: 8000
+  push_poll_s: 1.0           # how often the push channel checks SQLite for new alerts
+  session_hours: 12          # login lifetime
+
+demo:
+  # Replay datasets for demo mode. "nse" needs `fetch-history` first; "us" uses the
+  # US build's yfinance bars (moved to data/history_us.db).
+  datasets:
+    nse:
+      label: NSE Nifty 500 (Dhan 1-minute bars)
+      history_db: data/history.db
+      tickers_file: tickers.csv
+      sector_column: industry
+      index_symbol: NIFTY50
+      index_name: NIFTY 50
+      currency: "₹"
+      timezone: Asia/Kolkata
+    us:
+      label: US S&P 500 (Yahoo 1-minute bars, 2026-08-31 to 2026-09-25)
+      history_db: data/history_us.db
+      tickers_file: demo/us_tickers.csv
+      sector_column: sector
+      index_symbol: SPY
+      index_name: SPY
+      currency: "$"
+      timezone: America/New_York
+  db_path: data/demo.db       # rebuilt on every demo start
+  speed: 60                   # replayed market minutes per real minute
+  warm_days: 1                # replay this many days instantly first (fills history for search)
 
 # Alert and replay settings are unchanged from the US run (not retuned for NSE).
 alerts:

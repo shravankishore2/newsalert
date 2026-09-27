@@ -3,9 +3,10 @@
 Async market monitoring and news alerts for the Nifty 500. Every minute during the NSE
 session it pulls last traded prices for all 500 stocks plus NIFTY 50 in one batched
 DhanHQ request. It runs a threshold + moving-average + index-correlation alert filter,
-sends alerts to Telegram with matching NSE announcements and BusinessLine headlines,
-and stores every alert in SQLite. A replay mode runs the same logic over Dhan 1-minute
-history and writes [`docs/RESULTS.md`](docs/RESULTS.md).
+stores every alert in SQLite with matching NSE announcements and BusinessLine headlines,
+and shows them on a password-protected web dashboard that updates live. A replay mode
+runs the same logic over Dhan 1-minute history and writes [`docs/RESULTS.md`](docs/RESULTS.md).
+A demo mode drives the whole dashboard from replayed data, with no credentials needed.
 
 The original US version (Finnhub, S&P 500) is the first commit, `3a097e7`. Its measured
 results are kept in `docs/RESULTS.md`.
@@ -15,6 +16,7 @@ results are kept in `docs/RESULTS.md`.
 ```bash
 uv venv --python 3.12 .venv
 uv pip install --python .venv -e '.[dev]'
+npm --prefix web install && npm --prefix web run build   # dashboard frontend (Node 20+)
 cp .env.example .env   # then fill in the values below
 ```
 
@@ -26,8 +28,7 @@ cp .env.example .env   # then fill in the values below
 | `DHAN_PIN` | Your 6-digit Dhan PIN |
 | `DHAN_TOTP_SECRET` | The base32 secret shown when you enable TOTP in Dhan (the text form of the QR code) |
 | `DHAN_ACCESS_TOKEN` | *Alternative* to PIN + TOTP: a token from web.dhan.co. Used until it expires (24 h) and not refreshed automatically |
-| `TELEGRAM_BOT_TOKEN` | From @BotFather |
-| `TELEGRAM_CHAT_ID` | Send the bot a message, then read `getUpdates` |
+| `DASHBOARD_PASSWORD` | Dashboard login (single user). Required for `serve`; `demo` generates and prints one if unset |
 
 Dhan account prerequisites:
 
@@ -41,15 +42,111 @@ Dhan account prerequisites:
 
 ```bash
 .venv/bin/python -m newsalert token                    # generate/check the Dhan token (TOTP)
-.venv/bin/python -m newsalert smoke-test               # token, LTP, 1-min history, feeds, Telegram
+.venv/bin/python -m newsalert demo                     # dashboard on replayed data (no credentials)
+.venv/bin/python -m newsalert smoke-test               # token, LTP, 1-min history, feeds
 .venv/bin/python -m newsalert live --tickers RELIANCE,TCS,INFY --minutes 30   # small live run
 .venv/bin/python -m newsalert live                     # all 500; sleeps outside market hours
+.venv/bin/python -m newsalert serve                    # dashboard for live mode (run beside `live`)
 .venv/bin/python -m newsalert fetch-history            # 90 days of 1-min bars from Dhan
 .venv/bin/python -m newsalert replay                   # updates the NSE section of docs/RESULTS.md
 .venv/bin/python -m pytest                             # offline test suite
 ```
 
 `build-universe <ind_nifty500list.csv>` rebuilds `tickers.csv` (see *Universe*).
+
+## Dashboard
+
+A FastAPI backend (`newsalert/web/`) serves the React (Vite) frontend in `web/` and a
+JSON API. It only **reads** SQLite; live mode or the demo driver writes alerts and
+status there. It listens on `127.0.0.1:8000` (`dashboard.host`/`port` in `config.yaml`).
+
+What it shows:
+
+- **Alert feed.** Ticker, company, sector, direction (▲/▼ with a label, never colour
+  alone), move %, time, and *why the alert passed* each filter: the fast/slow SMA and
+  how far the fast SMA moved, and the correlation, beta and index-adjusted move. New
+  alerts appear at the top without a refresh.
+- **Filters and search.** Ticker (with autocomplete), sector, direction, and a text
+  search over past alerts (ticker, company name, news headlines), with "load older".
+- **Alert detail.** The move, the price, NIFTY 50 over the same window, the filter
+  reasons in plain language, and a chart of the stock and NIFTY 50 from an hour before
+  the reference price. The chart shows % change on one shared axis, with a hover
+  tooltip and a data-table view. Matching news shows **headline, source and link only**.
+  Article text is never stored or shown, and links open on the publisher's site.
+- **Status bar.** Market open/closed (next open when closed), the last price cycle and
+  how many prices it got, Dhan token state and time left, news feed health (checked
+  every 15 min during market hours, and on every alert), and the push connection.
+- **Results page.** The false-alert tiles (rate, 95% CI, n) parsed from
+  `docs/RESULTS.md`, with each market's full section rendered below.
+
+### Demo mode
+
+```bash
+.venv/bin/python -m newsalert demo                 # picks NSE data if fetched, else the US replay
+.venv/bin/python -m newsalert demo --dataset us --speed 120 --port 8001
+```
+
+- Replays stored 1-minute bars through the **real alert engine**, into a scratch
+  `data/demo.db` that is rebuilt on each start.
+- The first day replays instantly, so there's history to search. After that it runs
+  at `--speed` market minutes per real minute (default 60×), with overnight gaps
+  compressed to 3 s.
+- **Clearly labelled:**
+  - A "REPLAY DATA — Not live" banner with the dataset name, replay clock and progress
+    stays on every page.
+  - A REPLAY tag sits in the header.
+  - Times say "(replayed)", and the status bar shows the token and news as "Not used".
+- Replayed data has no archived news, so demo alerts have no news items, and the UI says
+  so rather than showing invented headlines.
+- **Datasets** (`demo.datasets` in `config.yaml`):
+  - `nse` uses `data/history.db` from `fetch-history`.
+  - `us` uses the US build's 19 days of Yahoo bars in `data/history_us.db`. That file is
+    local-only and gitignored; Yahoo data isn't redistributed. A fresh clone has no
+    demo data until `fetch-history` runs.
+- If `DASHBOARD_PASSWORD` isn't set, demo prints a one-off password.
+
+### Live mode
+
+Run the monitor and the dashboard as two processes (they share `data/alerts.db`):
+
+```bash
+.venv/bin/python -m newsalert live      # terminal 1: polls Dhan during NSE hours
+.venv/bin/python -m newsalert serve     # terminal 2: dashboard; needs DASHBOARD_PASSWORD
+```
+
+### Login
+
+- **Single user.** The password comes from `DASHBOARD_PASSWORD` and is compared in
+  constant time.
+- **Session:** an HMAC-signed, HttpOnly, SameSite=Strict cookie (Secure over HTTPS)
+  that expires after 12 h. It's signed with a random per-process key, so restarting
+  the server logs you out.
+- **Lockout:** 5 wrong passwords within 5 minutes lock logins for 60 s.
+- Every data endpoint and the push stream return 401 without a valid session. Only the
+  login page and `/api/health` are public.
+- The server binds to localhost by default and warns if you bind it elsewhere.
+- The news licences (see *News sources*) allow personal use only, so don't expose the
+  dashboard publicly.
+
+### Push channel
+
+- **Server-sent events** at `/api/stream`. The server polls SQLite for new alert rows
+  every `dashboard.push_poll_s` (1 s) and sends each as `event: alert` with its id.
+  About every 5 s it also sends `event: status`, with keep-alive comments in between.
+- **No alerts lost on reconnect.** Browsers reconnect by themselves and send
+  `Last-Event-ID`, so the stream resumes after the last alert received.
+- **Why SSE rather than WebSocket:** pushes only go server → browser, SSE works through
+  the same login cookie, and polling SQLite lets `live` and `serve` run as separate
+  processes.
+- **Latency:** the stored `latency_ms` covers quote received → alert committed.
+  Reaching the browser adds up to one poll interval.
+
+### Frontend development
+
+```bash
+npm --prefix web run dev     # Vite on :5173, proxies /api to the Python server on :8000
+npm --prefix web run lint
+```
 
 ## Universe
 
@@ -84,18 +181,21 @@ config.yaml / .env / tickers.csv
    signals.Engine.on_price (NIFTY 50 first, then each stock)   ◀── same engine as replay.py
         │ Alert
         ▼
-   TelegramClient.send ──▶ Store.insert_alert (latency recorded)
+   Store.insert_alert (filter reasons + latency) ──▶ SQLite ◀── dashboard (FastAPI) ──SSE──▶ browser
         │
-        └─ background: NSE announcements RSS + BusinessLine RSS (cached 5 min) ─▶ Telegram reply
+        └─ background: NSE announcements RSS + BusinessLine RSS (cached 5 min) ─▶ alert's news
 ```
 
 | Module | Role |
 |---|---|
 | `newsalert/signals.py` | Pure alert logic: threshold, MA filter, correlation filter, cooldown, staleness rules. Unchanged from the US build |
-| `newsalert/live.py` | Market-hours scheduler, pre-open token refresh, batched cycle, alert dispatch, news replies |
+| `newsalert/live.py` | Market-hours scheduler, pre-open token refresh, batched cycle, alert storage, news lookup, status for the dashboard |
+| `newsalert/web/` | FastAPI dashboard API, password login, SSE push channel, static frontend |
+| `newsalert/demo.py` | Demo driver: replays stored bars through the engine at a chosen speed |
+| `web/` | React + Vite frontend (feed, detail, status bar, results) |
 | `newsalert/auth.py` | TOTP (RFC 6238), Dhan token generation, private token cache, log redaction |
 | `newsalert/market.py` | NSE calendar: IST session, weekends, trading holidays |
-| `newsalert/clients.py` | Dhan (LTP, intraday), RSS feeds and news matching, Telegram. All take an injected `httpx.AsyncClient` |
+| `newsalert/clients.py` | Dhan (LTP, intraday), RSS feeds and news matching. All take an injected `httpx.AsyncClient` |
 | `newsalert/history.py` | Dhan 1-minute history download with ≤90-day windows and a timestamp sanity check |
 | `newsalert/replay.py` | Replay, false-alert classification, latency percentiles, per-market RESULTS sections |
 | `newsalert/universe.py` | Nifty 500 CSV + Dhan scrip master → `tickers.csv` |
@@ -181,9 +281,10 @@ What this means for the design:
 
 ## News sources
 
-News is fetched only when an alert fires, each feed at most once per 5 minutes, with a
-`newsalert/0.2 (personal, non-commercial)` User-Agent. Headlines go only to your own
-Telegram chat.
+News is fetched when an alert fires, plus a health check at most every 15 minutes during
+market hours. Each feed is fetched at most once per 5 minutes, with a
+`newsalert/0.2 (personal, non-commercial)` User-Agent. Only headline, source, link and
+time are kept, and they're shown only on your password-protected dashboard.
 
 Terms reviewed **2026-09-27**. robots.txt allows every feed URL below for a generic bot,
 but the terms of use are stricter, so they decided the selection:

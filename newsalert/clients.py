@@ -223,23 +223,3 @@ def match_news(items: list[NewsItem], symbol: str, name: str, limit: int = 3) ->
     hits = [i for i in items if (i.symbol_hint == symbol) or
             (not i.symbol_hint and pat is not None and pat.search(i.headline))]
     return sorted(hits, key=lambda i: i.published, reverse=True)[:limit]
-
-
-class TelegramClient:
-    def __init__(self, http: httpx.AsyncClient, token: str, chat_id: str,
-                 base_url: str = "https://api.telegram.org"):
-        self.http, self.token, self.chat_id, self.base_url = http, token, chat_id, base_url
-
-    async def send(self, text: str, reply_to: int | None = None) -> int:
-        """Send a message; returns Telegram's message_id."""
-        payload = {"chat_id": self.chat_id, "text": text, "disable_web_page_preview": True}
-        if reply_to:
-            payload["reply_to_message_id"] = reply_to
-        try:
-            resp = await self.http.post(f"{self.base_url}/bot{self.token}/sendMessage", json=payload)
-        except httpx.HTTPError as e:
-            raise FetchError(f"telegram: {type(e).__name__}") from None
-        body = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
-        if resp.status_code != 200 or not body.get("ok"):
-            raise FetchError(f"telegram: HTTP {resp.status_code} {body.get('description', '')}")
-        return body["result"]["message_id"]

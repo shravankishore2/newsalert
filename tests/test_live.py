@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 import yaml
 
 from newsalert.auth import DhanAuth
-from newsalert.clients import DhanClient, Instrument, RssFeed, TelegramClient
+from newsalert.clients import DhanClient, Instrument, RssFeed
 from newsalert.config import Ticker
 from newsalert.live import LiveMonitor
 from newsalert.market import IST, MarketCalendar
@@ -36,7 +36,7 @@ def setup(start, *, params=None, lead=30):
     mon = LiveMonitor(
         tickers=[Ticker("ALPHA", "Alpha Industries Ltd.", "101"), Ticker("BETA", "Beta Ltd.", "202")],
         index=NIFTY, engine=Engine(params, "NIFTY50"), dhan=dhan, auth=auth,
-        telegram=TelegramClient(http, "T", "C"), feeds=[RssFeed(http, "NSE announcements", NSE_FEED, clock=clock)],
+        feeds=[RssFeed(http, "NSE announcements", NSE_FEED, clock=clock)],
         store=Store(":memory:"), calendar=CAL, cycle_s=60, token_refresh_lead_min=lead,
         clock=clock, sleep=clock.sleep)
     return clock, fake, http, mon
@@ -51,24 +51,31 @@ async def test_one_batched_ltp_request_covers_every_ticker():
     assert (s.ok, s.failed) == (3, 0)
 
 
-async def test_alert_missing_ticker_skipped_and_news_reply():
-    clock, fake, http, mon = setup(datetime(2026, 10, 1, 10, 0, tzinfo=IST))
+async def test_alert_stored_with_reasons_missing_ticker_skipped_and_news_attached():
+    params = Params(warmup_returns=3, ma_enabled=True, ma_fast_min=2, ma_slow_min=10, corr_enabled=False,
+                    move_window_min=5)
+    clock, fake, http, mon = setup(datetime(2026, 10, 1, 10, 0, tzinfo=IST), params=params)
     async with http:
         for _ in range(8):
             await mon.run_cycle()
             clock.t += 60
-        fake.prices[("NSE_EQ", "101")] = 105.0        # ALPHA +5%
-        fake.prices[("NSE_EQ", "202")] = 60.0         # BETA +20%, but missing from this reply
-        fake.missing = {("NSE_EQ", "202")}
-        s = await mon.run_cycle()
+        for px in (103.0, 105.0):                     # ALPHA climbs 5% over two cycles
+            fake.prices[("NSE_EQ", "101")] = px
+            fake.prices[("NSE_EQ", "202")] = 60.0     # BETA +20%, but missing from the reply
+            fake.missing = {("NSE_EQ", "202")}
+            s = await mon.run_cycle()
+            clock.t += 60
         await mon.drain()
-    assert (s.alerts, s.failed, s.failures) == (1, 1, ["BETA"])
+    assert s.failures == ["BETA"] and s.failed == 1
     assert mon.engine.series["BETA"].px[-1] == 50.0   # nothing fed for the missing ticker
-    row = mon.store.conn.execute("SELECT symbol, delivered, latency_ms, news FROM alerts").fetchone()
+    row = mon.store.conn.execute(
+        "SELECT symbol, delivered, latency_ms, news, fast_sma, slow_sma, fast_move FROM alerts").fetchone()
     assert row[0] == "ALPHA" and row[1] == 1 and row[2] > 0
-    assert "order win" in json.loads(row[3])[0]["headline"]
-    assert "ALPHA +5.00%" in fake.sent[0]["text"] and "₹100.00 → ₹105.00" in fake.sent[0]["text"]
-    assert fake.sent[1]["reply_to_message_id"] == 1
+    news = json.loads(row[3])
+    assert "order win" in news[0]["headline"] and set(news[0]) == {"source", "headline", "url", "published"}
+    assert row[4] > row[5] and row[6] > 0              # why the MA filter passed is stored
+    st = mon.store.get_status()
+    assert st["cycle"]["value"]["missing"] == ["BETA"] and st["feeds"]["value"]["NSE announcements"]["ok"]
 
 
 async def test_failed_request_skips_whole_cycle():
@@ -114,14 +121,11 @@ async def test_scheduler_does_not_regenerate_a_token_that_outlives_the_session()
     assert fake.token_n == 1
 
 
-async def test_telegram_failure_still_stores_undelivered_alert():
+async def test_token_rejection_published_to_status():
     clock, fake, http, mon = setup(datetime(2026, 10, 1, 10, 0, tzinfo=IST))
-    mon.telegram = TelegramClient(http, "T", "C", base_url="https://telegram.invalid")
+    fake.reject_token_once = True
     async with http:
-        for _ in range(8):
-            await mon.run_cycle()
-            clock.t += 60
-        fake.prices[("NSE_EQ", "101")] = 105.0
         await mon.run_cycle()
-        await mon.drain()
-    assert mon.store.conn.execute("SELECT delivered, sent_ns FROM alerts").fetchall() == [(0, None)]
+    st = mon.store.get_status()
+    assert st["token"]["value"]["state"] == "error" and "token rejected" in st["token"]["value"]["error"]
+    assert st["cycle"]["value"]["error"]

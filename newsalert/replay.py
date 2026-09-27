@@ -4,7 +4,7 @@ Metrics
 - Latency: per alert, from the moment the price update is handed to the pipeline
   (received) to the moment the alert has been written to SQLite and passed to the
   sender (sent). In replay the sender is a stub, so this is in-process latency only;
-  live Telegram latency is reported separately from live-mode alerts.
+  live latency is reported separately from live-mode alerts.
 - False-alert rate: an alert is false if, within `false_alert_window_min` after it
   fires, the price gives back more than `reversal_frac` of the move (move measured
   from the reference price to the alert price). Alerts without a full forward window
@@ -164,7 +164,7 @@ def render_results(*, title: str, source_desc: str, summary: tuple, trading_days
     L += ["### 1. Alert latency", "", "#### Replay (in-process)", "",
           "Measured from the moment each price update enters the pipeline to the moment the alert is "
           "committed to SQLite and handed to the sender. The sender in replay is a stub, so this "
-          "**does not include Telegram network time**. Measured on the machine that ran the replay.", "",
+          "is a lower bound. Measured on the machine that ran the replay.", "",
           "| Variant | Alerts | p50 | p95 |", "|---|---:|---:|---:|"]
     for r in (u, f):
         if r.latencies_ms:
@@ -172,10 +172,11 @@ def render_results(*, title: str, source_desc: str, summary: tuple, trading_days
                      f"| {percentile(r.latencies_ms, .95):.3f} ms |")
         else:
             L.append(f"| {r.variant} | 0 | n/a | n/a |")
-    L += ["", "#### Live (end to end, including Telegram)", ""]
+    L += ["", "#### Live (quote received to alert committed for the dashboard)", ""]
     if live_latencies:
         L += [f"From {len(live_latencies)} delivered live alerts in `alerts.db`: time from the price "
-              "response being parsed to Telegram `sendMessage` being acknowledged.", "",
+              "response being parsed to the alert row being committed to SQLite. The dashboard's "
+              "push loop adds up to its poll interval (1 s by default) before a browser sees it.", "",
               f"- p50: {percentile(live_latencies, .5):.1f} ms",
               f"- p95: {percentile(live_latencies, .95):.1f} ms"]
         if len(live_latencies) < min_sample:

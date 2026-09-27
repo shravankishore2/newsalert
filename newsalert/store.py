@@ -25,6 +25,10 @@ CREATE TABLE IF NOT EXISTS alerts (
     index_move REAL,
     corr REAL,
     beta REAL,
+    fast_sma REAL,
+    slow_sma REAL,
+    fast_move REAL,
+    residual REAL,
     received_ns INTEGER,             -- monotonic ns when the price update was received
     sent_ns INTEGER,                 -- monotonic ns when the alert was sent
     latency_ms REAL,
@@ -32,6 +36,7 @@ CREATE TABLE IF NOT EXISTS alerts (
     news TEXT
 );
 CREATE INDEX IF NOT EXISTS alerts_run ON alerts(run_id, variant);
+CREATE INDEX IF NOT EXISTS alerts_symbol_ts ON alerts(symbol, ts);
 CREATE TABLE IF NOT EXISTS quotes (
     symbol TEXT NOT NULL,
     ts INTEGER NOT NULL,
@@ -45,15 +50,34 @@ CREATE TABLE IF NOT EXISTS bars (
     PRIMARY KEY (symbol, ts)
 );
 CREATE INDEX IF NOT EXISTS bars_ts ON bars(ts);
+CREATE TABLE IF NOT EXISTS status (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,             -- JSON
+    updated_at REAL NOT NULL         -- epoch seconds
+);
 """
+
+# Columns added after the first release; ALTERed into older databases on open.
+_MIGRATIONS = {"alerts": ["fast_sma REAL", "slow_sma REAL", "fast_move REAL", "residual REAL"]}
 
 
 class Store:
     def __init__(self, path: str | Path):
         if str(path) != ":memory:":
             Path(path).parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(path)
+        self.conn = sqlite3.connect(path, check_same_thread=False)
+        self.conn.execute("PRAGMA journal_mode=WAL")  # dashboard reads while live/demo writes
+        self._migrate()
         self.conn.executescript(SCHEMA)
+
+    def _migrate(self) -> None:
+        for table, cols in _MIGRATIONS.items():
+            have = {r[1] for r in self.conn.execute(f"PRAGMA table_info({table})")}
+            if not have:
+                continue  # fresh database: SCHEMA creates the full table
+            for col in cols:
+                if col.split()[0] not in have:
+                    self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {col}")
 
     def close(self) -> None:
         self.conn.close()
@@ -64,10 +88,12 @@ class Store:
         latency = (sent_ns - received_ns) / 1e6 if (sent_ns and received_ns) else None
         cur = self.conn.execute(
             """INSERT INTO alerts (mode, run_id, variant, symbol, ts, direction, move, ref_ts,
-               ref_price, price, index_move, corr, beta, received_ns, sent_ns, latency_ms, delivered)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               ref_price, price, index_move, corr, beta, fast_sma, slow_sma, fast_move, residual,
+               received_ns, sent_ns, latency_ms, delivered)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (mode, run_id, variant, a.symbol, a.ts, a.direction, a.move, a.ref_ts, a.ref_price,
-             a.price, a.index_move, a.corr, a.beta, received_ns, sent_ns, latency, int(delivered)),
+             a.price, a.index_move, a.corr, a.beta, a.fast_sma, a.slow_sma, a.fast_move, a.residual,
+             received_ns, sent_ns, latency, int(delivered)),
         )
         self.conn.commit()
         return cur.lastrowid
@@ -88,6 +114,17 @@ class Store:
     def live_latencies(self) -> list[float]:
         return [r[0] for r in self.conn.execute(
             "SELECT latency_ms FROM alerts WHERE mode='live' AND delivered=1 AND latency_ms IS NOT NULL")]
+
+    # --- status (written by live/demo, read by the dashboard) ------------------
+    def set_status(self, key: str, value, now: float | None = None) -> None:
+        import time as _t
+        self.conn.execute("INSERT OR REPLACE INTO status VALUES (?,?,?)",
+                          (key, json.dumps(value), _t.time() if now is None else now))
+        self.conn.commit()
+
+    def get_status(self) -> dict[str, dict]:
+        return {k: {"value": json.loads(v), "updated_at": u}
+                for k, v, u in self.conn.execute("SELECT key, value, updated_at FROM status")}
 
     # --- live quotes --------------------------------------------------------
     def insert_quote(self, symbol: str, ts: int, price: float) -> None:
