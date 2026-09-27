@@ -148,6 +148,63 @@ npm --prefix web run dev     # Vite on :5173, proxies /api to the Python server 
 npm --prefix web run lint
 ```
 
+## Deployment (Oracle Cloud VM)
+
+The production setup is an Ubuntu 24.04 VM with 1 GB RAM plus a 2 GB swap file. The
+files are in [`deploy/`](deploy/).
+
+| Unit | What it does |
+|---|---|
+| `newsalert-live.timer` | Fires at **09:10 IST, Monday–Friday** (`Persistent=true`, so a missed start runs at boot) |
+| `newsalert-live.service` | `ExecCondition=is-trading-window --until 15:35` skips NSE holidays and late starts without marking a failure. `ExecStartPre=token` makes sure the Dhan token lasts the session. `live --until 15:35` stops the monitor, with `RuntimeMaxSec=6h30min` as a backstop |
+| `newsalert-web.service` | Always-on dashboard over live data, on `127.0.0.1:8000` |
+| `newsalert-demo.service` | Always-on demo (replayed NSE bars, labelled as replay) on `127.0.0.1:8001` |
+| Caddy (`deploy/Caddyfile`) | HTTPS through Let's Encrypt. The live dashboard is at `https://<ip-with-dashes>.sslip.io`, the demo at `https://demo.<ip-with-dashes>.sslip.io`. sslip.io resolves those names to the IP, so no DNS is needed. SSE is streamed unbuffered (`flush_interval -1`) |
+
+Setup outline, in the order used:
+
+1. Add a read-only GitHub deploy key on the VM, then clone to `~/newsalert`.
+2. Install `python3.12-venv`, create `.venv`, and run `pip install -e '.[dev]'`.
+3. Install Node 22 from the official, checksum-verified tarball into `~/.local/node`, then
+   `npm ci && npm run build` in `web/`.
+4. Copy `.env` with `scp`, then `chmod 600`.
+5. Open ports 80/443 in iptables (inserted before Oracle's default REJECT rule, then
+   `netfilter-persistent save`) **and** in the Oracle VCN security list; the console
+   step is below.
+6. Install the units, run `systemctl enable --now newsalert-web newsalert-live.timer
+   newsalert-demo`, and install the Caddyfile with the host filled in.
+
+**Oracle console step.** The VM's firewall isn't enough; Oracle also filters at the
+subnet. Go to Networking → Virtual Cloud Networks → your VCN → the instance's subnet →
+Security List. Add two ingress rules: source `0.0.0.0/0`, TCP, destination ports `80`
+and `443`. Port 80 is needed for Let's Encrypt's HTTP challenge and the redirect to
+HTTPS.
+
+Operations:
+
+```bash
+systemctl list-timers newsalert-live.timer            # next run
+journalctl -u newsalert-live -f                       # today's session
+.venv/bin/python -m newsalert is-trading-window       # would today's run start?
+cd ~/newsalert && git pull && .venv/bin/pip install -e . && npm --prefix web ci && npm --prefix web run build && sudo systemctl restart newsalert-web newsalert-demo
+```
+
+### Can a password-protected demo show Dhan data?
+
+**Unconfirmed.** As of 2026-09-27, neither Dhan's terms (`dhan.co/terms`) nor the DhanHQ
+v2 docs have a clause specifically about data fetched through the APIs. The general
+terms say: "Except as expressly authorized by Dhan Platform, You agree not to sell,
+license, distribute, copy, modify, publicly perform or display, transmit, publish…
+the materials." That rules out public display and redistribution. It doesn't clearly
+say whether a single-user, password-protected dashboard that shows the subscriber
+their own Data API results counts. NSE's own market-data licensing may also apply.
+
+Until Dhan confirms in writing:
+
+- Treat the dashboard, demo included, as **personal use only**.
+- Don't share the password or make the demo public.
+- Ask Dhan support (dhan.co/support) before showing it to anyone else.
+
 ## Universe
 
 `tickers.csv` holds the **500 Nifty 500 constituents**. Columns: symbol, name, industry,
