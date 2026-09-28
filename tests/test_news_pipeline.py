@@ -328,3 +328,26 @@ async def test_evaluate_pending_waits_for_close():
     assert evaluate_pending(store, CAL, price_fn(data), "NIFTY50", now=open_ + 7 * 3600) == 1
     abn = store.conn.execute("SELECT abn_15m, abn_close, t0_rule FROM news_alert_stocks").fetchone()
     assert abn[0] > 0 and abn[1] > 0 and abn[2] == "alert time"
+
+
+async def test_gemini_server_errors_back_off_exponentially():
+    s, c = Server(), Clock()
+    s.feeds[NSE_URL] = nse_xml([])
+    s.feeds[BL_URL] = bl_xml([("A", "a", rfc(NOW - 60))])
+    store, http, svc = make(s, c)
+    async with http:
+        await svc.poll_feed(svc.feeds[1])
+        (i1,) = store.conn.execute("SELECT id FROM news_items").fetchone()
+        s.gemini_replies = [(503, {"error": {"status": "UNAVAILABLE"}}), (503, {"error": {"status": "UNAVAILABLE"}}),
+                            (200, {"items": [item_json(i1)]})]
+        await svc.classify_pending()
+        assert svc.gemini.paused_until == NOW + 360 and not svc.gemini.can_request()
+        await svc.classify_pending()                      # still paused: no request
+        assert len(s.gemini_calls) == 1
+        c.t += 361
+        await svc.classify_pending()                      # second 503: pause doubles
+        assert svc.gemini.paused_until == c.t + 720
+        c.t += 721
+        await svc.classify_pending()                      # recovers
+    assert store.conn.execute("SELECT status FROM news_items").fetchone()[0] == "classified"
+    assert svc.gemini.server_errors == 0 and len(s.gemini_calls) == 3

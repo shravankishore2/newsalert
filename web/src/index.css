@@ -355,7 +355,7 @@ table.stocks th { text-align: left; }
 .news-card.tone-pos:hover, .news-card.tone-neg:hover, .news-card.tone-neu:hover { filter: brightness(0.985); }
 .nc-head { display: flex; align-items: baseline; gap: 10px; }
 .nc-company { font-size: 17px; font-weight: 700; line-height: 1.3; flex: 1; min-width: 0; }
-.nc-ticker { font-weight: 600; color: var(--text-secondary); }
+.nc-ticker { font-weight: 600; color: var(--text-secondary); white-space: nowrap; }
 .nc-event { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; font-size: 15.5px; line-height: 1.4; }
 .nc-line { color: var(--text-primary); }
 .news-card .reason-line { font-size: 14.5px; }

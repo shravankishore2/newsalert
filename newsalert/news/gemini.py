@@ -99,6 +99,7 @@ class GeminiClassifier:
         self.rpd, self.batch_size, self.base_url, self.clock = rpd, batch_size, base_url, clock
         self.limiter = limiter or RateLimiter([(rpm, 60.0)])
         self.paused_until = 0.0
+        self.server_errors = 0
         self.last_quota: dict = {}
         self._ticker_block = "\n".join(f"{s}: {n}" for s, n in sorted(tickers.items()))
 
@@ -151,7 +152,14 @@ class GeminiClassifier:
                 msg = (resp.json().get("error") or {}).get("status", "")
             except ValueError:
                 pass
+            if resp.status_code >= 500:
+                # Model overloaded/unavailable (seen for hours on the free tier, 2026-09-28): back off
+                # exponentially so retries don't burn the daily cap. Reset on the next success.
+                self.server_errors += 1
+                delay = min(3600.0, 180.0 * 2 ** self.server_errors)
+                self.paused_until = max(self.paused_until, self.clock() + delay)
             raise GeminiError(f"HTTP {resp.status_code} {msg}".strip())
+        self.server_errors = 0
         try:
             data = resp.json()
             return data["candidates"][0]["content"]["parts"][0]["text"]
