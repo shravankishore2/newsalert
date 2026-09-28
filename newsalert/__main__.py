@@ -95,7 +95,13 @@ async def cmd_news(args, cfg) -> int:
                                    batch_size=g["batch_size"], base_url=g["base_url"])
         else:
             log.warning("GEMINI_API_KEY not set: BusinessLine items stay pending; NSE filings are still classified")
-        svc = NewsService(http=http, store=store, tickers=tickers, gemini=gem,
+        exp = None
+        if sec.finnhub_api_key:
+            from .news.expectations import FinnhubEarnings
+            e = n["expectations"]
+            exp = FinnhubEarnings(http, sec.finnhub_api_key, store, base_url=e["base_url"],
+                                  per_minute=e["per_minute"], symbol_suffix=e["symbol_suffix"])
+        svc = NewsService(http=http, store=store, tickers=tickers, gemini=gem, expectations=exp,
                           feeds=[Feed(f["name"], f["source"], f["url"]) for f in n["feeds"]],
                           poll_s=n["poll_s"], max_age_min=n["max_age_min"], min_confidence=n["min_confidence"])
         await svc.run(max_polls=args.polls)
@@ -303,6 +309,7 @@ def cmd_serve(args, cfg) -> int:
                 "updated_at": Path(cfg["token_cache_path"]).stat().st_mtime}
 
     app = create_app(db_path=cfg["db_path"], info=info, password=_password(sec, False), token_fallback=token_from_cache,
+                     calendar=cal,
                      prices=lambda s, a, b: quotes.prices_between("quotes", s, a - 1, b), market=market,
                      push_poll_s=cfg["dashboard"]["push_poll_s"], session_hours=cfg["dashboard"]["session_hours"])
     return _serve(app, cfg, args)
@@ -332,6 +339,7 @@ def cmd_demo(args, cfg) -> int:
                     currency=ds["currency"], timezone=ds["timezone"],
                     tickers=_ticker_info(ds["tickers_file"], ds["sector_column"]), params=_alert_params(cfg))
     app = create_app(db_path=cfg["demo"]["db_path"], info=info, password=_password(sec, True),
+                     calendar=MarketCalendar.from_config(cfg["market"]) if name == "nse" else None,
                      prices=driver.prices, market=driver.market_state, background=driver.run,
                      push_poll_s=cfg["dashboard"]["push_poll_s"], session_hours=cfg["dashboard"]["session_hours"])
     print(f"demo: replaying {ds['label']} at {driver.speed:g}x", flush=True)

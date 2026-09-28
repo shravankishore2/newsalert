@@ -26,7 +26,7 @@ import httpx
 from pydantic import ValidationError
 
 from ..ratelimit import RateLimiter
-from .models import BatchResponse, Classification, gemini_response_schema, restrict_to_universe
+from .models import BatchResponse, Classification, figures_grounded, gemini_response_schema, restrict_to_universe
 
 log = logging.getLogger(__name__)
 PACIFIC = ZoneInfo("America/Los_Angeles")
@@ -40,6 +40,11 @@ For each item return:
   direction; strength low/medium/high; reason is one short line (under 25 words).
   Return an empty list if no listed stock is materially affected.
 - confidence: 0 to 1, your confidence in the classification as a whole.
+- results: ONLY for event_type "results", and ONLY with numbers written in the headline or summary:
+  period (e.g. "Q2 FY27"), revenue_cr / profit_cr (rupees crore; convert lakh crore = 100000 crore),
+  eps (rupees), and *_yoy_pct = the stated change vs the same quarter last year (e.g. "up 12%" -> 12).
+  Use null for anything not explicitly stated. Never estimate, compute from other numbers, or recall
+  figures from memory. For every other event type, results must be null.
 Base the answer only on the headline and summary given. Do not invent facts."""
 
 
@@ -172,9 +177,10 @@ class GeminiClassifier:
                     continue
                 if bi.id in expected:
                     out[bi.id] = Classification(event_type=bi.event_type, affected=bi.affected,
-                                                confidence=bi.confidence)
+                                                confidence=bi.confidence, results=bi.results)
             return out
-        return {bi.id: Classification(event_type=bi.event_type, affected=bi.affected, confidence=bi.confidence)
+        return {bi.id: Classification(event_type=bi.event_type, affected=bi.affected, confidence=bi.confidence,
+                                      results=bi.results)
                 for bi in batch.items if bi.id in expected}
 
     # -- public ---------------------------------------------------------------------------------
@@ -197,6 +203,7 @@ class GeminiClassifier:
                 results[it.id] = ItemOut(it.id, None, [], "invalid JSON twice")
         for it in items:
             if it.id in got:
-                clean, rejected = restrict_to_universe(got[it.id], self.universe)
+                grounded = figures_grounded(got[it.id], f"{it.headline} {it.summary or ''}")
+                clean, rejected = restrict_to_universe(grounded, self.universe)
                 results[it.id] = ItemOut(it.id, clean, rejected)
         return [results[i.id] for i in items if i.id in results]

@@ -186,3 +186,29 @@ export function fmtDuration(s: number | null | undefined) {
   if (s < 5400) return `${Math.round(s / 60)} min`
   return `${(s / 3600).toFixed(1)} h`
 }
+
+// --- company boards ------------------------------------------------------------------------
+
+export type ResultCard = {
+  ticker: string; name: string; sector: string; date: string; first_alert_at: number
+  sources: { source: string; headline: string | null; url: string; at: number; classifier: string }[]
+  briefing: string
+  figures: { period?: string | null; revenue_cr?: number | null; revenue_yoy_pct?: number | null; profit_cr?: number | null;
+    profit_yoy_pct?: number | null; eps?: number | null; eps_yoy_pct?: number | null } | null
+  expectations: { report_date: string; eps_estimate: number | null; eps_actual: number | null; revenue_estimate: number | null;
+    revenue_actual: number | null; eps_surprise_pct: number | null; revenue_surprise_pct: number | null } | null
+  reaction: { abn_15m: number | null; abn_1h: number | null; abn_close: number | null; t0_rule: string | null;
+    provisional: boolean; note?: string | null } | null
+  basis: 'expectations' | 'yoy' | 'reaction'
+  basis_label: string
+  verdict: string | null
+  gauge: { mode: 'expectations' | 'reaction'; value: number | null; min: number; max: number; unit: string; label: string }
+}
+
+export type ActionItem = { ticker: string; name: string; sector: string; kind: string; action_date: string | null;
+  label: string; url: string; filed_at: number; upcoming: boolean }
+
+export const boards = {
+  results: (days = 7) => get<{ items: ResultCard[]; expectations_configured: boolean }>(`/api/board/results?days=${days}`),
+  actions: (days = 30) => get<{ items: ActionItem[] }>(`/api/board/actions?days=${days}`),
+}

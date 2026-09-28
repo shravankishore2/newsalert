@@ -179,7 +179,8 @@ def create_app(*, db_path: str, info: SiteInfo, password: str, prices: PriceSour
                session_hours: float = 12, secret: bytes | None = None,
                clock: Callable[[], float] = time.time, context_min: int = 60,
                background: Callable[[], Awaitable[None]] | None = None,
-               token_fallback: Callable[[], dict | None] | None = None) -> FastAPI:
+               token_fallback: Callable[[], dict | None] | None = None,
+               calendar=None) -> FastAPI:
     @contextlib.asynccontextmanager
     async def lifespan(_app):
         task = asyncio.create_task(background()) if background else None
@@ -191,7 +192,7 @@ def create_app(*, db_path: str, info: SiteInfo, password: str, prices: PriceSour
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
 
-    app = FastAPI(title="newsalert dashboard", docs_url=None, redoc_url=None, openapi_url=None,
+    app = FastAPI(title="QuantRadar", docs_url=None, redoc_url=None, openapi_url=None,
                   lifespan=lifespan)
     signer = SessionSigner(secret, ttl_s=session_hours * 3600, clock=clock)
     checker = PasswordCheck(password, clock=clock)
@@ -371,6 +372,26 @@ def create_app(*, db_path: str, info: SiteInfo, password: str, prices: PriceSour
                             "prices": prices(sym, start, end), "index": prices(info.index_symbol, start, end)}
         return n
 
+    @app.get("/api/board/results")
+    async def board_results(request: Request, days: int = 7) -> dict:
+        authed(request)
+        from .board import results_board
+        now_ts = market().get("now_ts") or clock()
+        with db() as conn:
+            if not _has_news_tables(conn):
+                return {"items": [], "expectations_configured": False}
+            items = results_board(conn, info, prices, calendar, info.index_symbol, now_ts, max(1, min(days, 60)))
+        st = status_payload().get("news") or {}
+        return {"items": items, "expectations_configured": bool((st.get("value") or {}).get("expectations"))}
+
+    @app.get("/api/board/actions")
+    async def board_actions(request: Request, days: int = 30) -> dict:
+        authed(request)
+        from .board import actions_board
+        now_ts = market().get("now_ts") or clock()
+        with db() as conn:
+            return {"items": actions_board(conn, info, now_ts, max(1, min(days, 120)))}
+
     def status_payload() -> dict:
         st = {}
         if Path(db_path).exists():
@@ -475,7 +496,7 @@ def create_app(*, db_path: str, info: SiteInfo, password: str, prices: PriceSour
         if path.startswith("api/"):
             raise HTTPException(404)
         if dist is None or not (dist / "index.html").exists():
-            return HTMLResponse("<p>Frontend not built. Run <code>npm --prefix web run build</code>.</p>", 503)
+            return HTMLResponse("<p>QuantRadar: frontend not built. Run <code>npm --prefix web run build</code>.</p>", 503)
         f = (dist / path).resolve()
         if path and f.is_file() and dist.resolve() in f.parents:
             return FileResponse(f)

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 
-export type Route = { page: 'feed' } | { page: 'alert'; id: number } | { page: 'news'; id: number } | { page: 'results' }
+export type Route = { page: 'feed' } | { page: 'alert'; id: number } | { page: 'news'; id: number } | { page: 'results' } | { page: 'performance' }
 
 function parse(hash: string): Route {
   const m = hash.match(/^#\/alerts\/(\d+)/)
@@ -8,6 +8,7 @@ function parse(hash: string): Route {
   const n = hash.match(/^#\/news\/(\d+)/)
   if (n) return { page: 'news', id: Number(n[1]) }
   if (hash.startsWith('#/results')) return { page: 'results' }
+  if (hash.startsWith('#/performance')) return { page: 'performance' }
   return { page: 'feed' }
 }
 

@@ -8,7 +8,8 @@ import StatusBar from './components/StatusBar'
 import NewsFeed from './components/NewsFeed'
 import NewsDetail from './components/NewsDetail'
 import AlertDetail from './components/AlertDetail'
-import Results from './components/Results'
+import Performance from './components/Performance'
+import Board from './components/Board'
 
 type Auth = 'checking' | 'out' | 'in'
 
@@ -47,23 +48,25 @@ export default function App() {
     <div className="app">
       {me.mode === 'demo' && <ReplayBanner me={me} status={status} />}
       <header className="topbar">
-        <div className="brand"><img src="/favicon.svg" alt="" /> Market Alerts
+        <div className="brand"><img src="/favicon.svg" alt="" /> QuantRadar
           {me.mode === 'demo' && <span className="replay-tag" style={{ color: 'var(--replay-ink)', background: 'var(--replay-bg)' }}>REPLAY</span>}
         </div>
         <nav className="nav" aria-label="Main">
-          {nav('#/', 'Alerts', route.page !== 'results')}
+          {nav('#/', 'Alerts', route.page === 'feed' || route.page === 'news' || route.page === 'alert')}
           {nav('#/results', 'Results', route.page === 'results')}
+          {nav('#/performance', 'Model performance', route.page === 'performance')}
         </nav>
         <div className="spacer" />
         <span className="muted" style={{ fontSize: 13 }}>{me.dataset}</span>
         <button className="btn" onClick={async () => { await api.logout(); onAuthLost() }}>Log out</button>
       </header>
       <StatusBar me={me} status={status} conn={conn} />
-      <main className="main">
+      <main className={`main${route.page === 'feed' || route.page === 'results' ? ' wide' : ''}`}>
         {route.page === 'feed' && <NewsFeed me={me} pushedNews={pushedNews} pushedPrice={pushed} conn={conn} />}
         {route.page === 'news' && <NewsDetail key={`n${route.id}`} me={me} id={route.id} />}
         {route.page === 'alert' && <AlertDetail key={route.id} me={me} id={route.id} />}
-        {route.page === 'results' && <Results />}
+        {route.page === 'results' && <Board me={me} />}
+        {route.page === 'performance' && <Performance />}
       </main>
     </div>
   )

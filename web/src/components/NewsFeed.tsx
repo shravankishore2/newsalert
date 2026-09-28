@@ -5,12 +5,13 @@ import {
 } from '../api'
 import type { Conn } from '../stream'
 import Feed, { Direction } from './Feed'
+import { columnOf, primaryStock } from '../news'
 
 type Layer = 'news' | 'both' | 'price'
 type Filters = { symbol: string; sector: string; direction: '' | 'up' | 'down'; event_type: string; q: string }
 const EMPTY: Filters = { symbol: '', sector: '', direction: '', event_type: '', q: '' }
 
-const LAYER_KEY = 'newsalert.layer'
+const LAYER_KEY = 'quantradar.layer'
 function initialLayer(): Layer {
   try {
     const v = localStorage.getItem(LAYER_KEY)
@@ -46,7 +47,7 @@ export function StockChip({ s }: { s: NewsStock }) {
     <span className={`chip ${dir}`} title={s.reason ?? undefined}>
       <span aria-hidden="true">{s.direction === 'up' ? '▲' : s.direction === 'down' ? '▼' : '•'}</span>
       <strong>{s.ticker}</strong>
-      <span className="chip-meta">{s.direction ?? 'no direction'} · {s.relation}{s.strength ? ` · ${s.strength}` : ''}</span>
+      <span className="chip-meta">{s.relation}</span>
     </span>
   )
 }
@@ -55,33 +56,57 @@ export function EventBadge({ type }: { type: string }) {
   return <span className="event-badge">{type}</span>
 }
 
+/** One compact badge instead of separate strength / relation / confidence tags. */
+export function StrengthBadge({ n }: { n: NewsAlert }) {
+  const p = primaryStock(n)
+  const strength = p?.strength ? p.strength[0].toUpperCase() + p.strength.slice(1) : '—'
+  const conf = n.classifier === 'rules' ? 'rules' : n.confidence !== null ? `${Math.round(n.confidence * 100)}%` : ''
+  return <span className={`strength s-${p?.strength ?? 'none'}`}
+    title={`Strength ${strength.toLowerCase()} · ${n.classifier === 'rules' ? 'classified by NSE filing rules' : `classification confidence ${conf}`}`}>
+    {strength}{conf ? ` · ${conf}` : ''}</span>
+}
+
+// Rule labels that only restate the event type; the badge already says it.
+const GENERIC_NSE_LABELS = new Set(['financial results', 'regulatory action/order', 'management change', 'order/contract win',
+  'credit rating update', 'merger/acquisition filing', 'capital raise/allotment', 'fraud/default/legal filing',
+  'dividend/buyback', 'guidance/outlook', 'other filing'])
+
+function eventLine(n: NewsAlert, p: NewsStock | undefined): string | null {
+  if (n.source === 'nse' && n.headline) {
+    // NSE alerts carry "TICKER: Label"; the company is in the header, and generic labels repeat the badge
+    const label = p && n.headline.startsWith(`${p.ticker}: `) ? n.headline.slice(p.ticker.length + 2) : n.headline
+    return GENERIC_NSE_LABELS.has(label.toLowerCase()) ? null : label
+  }
+  return n.headline ?? '(no headline)'
+}
+
 function NewsCard({ n, me, fresh }: { n: NewsAlert; me: Me; fresh: boolean }) {
   const tz = me.timezone
-  const direct = n.stocks.filter((s) => s.relation === 'direct')
-  const second = n.stocks.filter((s) => s.relation !== 'direct')
+  const p = primaryStock(n)
+  const others = n.stocks.filter((s) => s !== p && s.ticker !== p?.ticker)
+  const col = columnOf(n)
   return (
-    <a className={`news-card${fresh ? ' fresh' : ''}`} href={`#/news/${n.id}`}>
-      <div className="news-top">
+    <a className={`news-card tone-${col}${fresh ? ' fresh' : ''}`} href={`#/news/${n.id}`}>
+      <div className="nc-head">
+        <span className="nc-company">{p?.name || p?.ticker || 'Market'}{p && <span className="nc-ticker"> · {p.ticker}</span>}</span>
+        <StrengthBadge n={n} />
+      </div>
+      <div className="nc-event">
         <EventBadge type={n.event_type} />
-        <span className="muted">{SOURCE_LABEL[n.source] ?? n.source}</span>
-        {n.classifier === 'rules' && <span className="muted" title="NSE filings are classified by local rules, never sent to an LLM">· rules</span>}
-        <span className="spacer" />
-        <span className="when num">
-          {fmtTime(n.created_at, tz)} {tzAbbr(tz)} <span className="muted">{fmtDate(n.created_at, tz)}</span>
-        </span>
+        {eventLine(n, p) && <span className="nc-line">{eventLine(n, p)}</span>}
       </div>
-      <div className="headline">{n.headline ?? '(no headline)'}</div>
-      <div className="chips">
-        {direct.map((s) => <StockChip key={`${s.ticker}-d`} s={s} />)}
-        {second.map((s) => <StockChip key={`${s.ticker}-${s.relation}`} s={s} />)}
-      </div>
-      {n.stocks[0]?.reason && n.classifier === 'gemini' && <div className="reason-line">{n.stocks[0].reason}</div>}
-      <div className="news-foot muted">
+      {n.classifier === 'gemini' && p?.reason && <div className="reason-line">{p.reason}</div>}
+      {others.length > 0 && (
+        <div className="chips" aria-label="Other affected stocks">
+          {others.map((s) => <StockChip key={`${s.ticker}-${s.relation}`} s={s} />)}
+        </div>
+      )}
+      <div className="news-foot">
+        <span className="num">{fmtTime(n.created_at, tz)} {tzAbbr(tz)} · {fmtDate(n.created_at, tz)}</span>
+        <span>{SOURCE_LABEL[n.source] ?? n.source}</span>
         {n.latency_s !== null && <span>alerted {fmtDuration(n.latency_s)} after publication</span>}
-        {n.confidence !== null && <span>confidence {Math.round(n.confidence * 100)}%</span>}
         {n.linked_price_alerts.length > 0 && (
-          <span className="linked">↳ {n.linked_price_alerts.length} linked price move{n.linked_price_alerts.length > 1 ? 's' : ''}:{' '}
-            {n.linked_price_alerts.map((p) => `${p.symbol} ${pct(p.move)}`).join(', ')}</span>
+          <span className="linked">↳ {n.linked_price_alerts.map((x) => `${x.symbol} ${pct(x.move)}`).join(', ')}</span>
         )}
       </div>
     </a>
@@ -99,6 +124,64 @@ function PriceCardSmall({ a, me }: { a: Alert; me: Me }) {
       <span className="spacer" />
       <span className="muted num">{fmtTime(a.ts, me.timezone)} {tzAbbr(me.timezone)}</span>
     </a>
+  )
+}
+
+type Row = { kind: 'news'; t: number; n: NewsAlert } | { kind: 'price'; t: number; a: Alert }
+const NEU_KEY = 'quantradar.neutralCollapsed'
+
+function Columns({ rows, me, freshIds, loading }: { rows: Row[]; me: Me; freshIds: Set<number>; loading: boolean }) {
+  const [tab, setTab] = useState<'pos' | 'neg' | 'neu'>('pos')
+  const [neuCollapsed, setNeuCollapsed] = useState(() => {
+    try { return localStorage.getItem(NEU_KEY) === '1' } catch { return false }
+  })
+  const toggleNeu = () => setNeuCollapsed((v) => {
+    try { localStorage.setItem(NEU_KEY, v ? '0' : '1') } catch { /* ignore */ }
+    return !v
+  })
+  const col = (r: Row) => r.kind === 'news' ? columnOf(r.n) : (r.a.direction > 0 ? 'pos' : 'neg')
+  const groups = { pos: rows.filter((r) => col(r) === 'pos'), neg: rows.filter((r) => col(r) === 'neg'),
+    neu: rows.filter((r) => col(r) === 'neu') }
+  const count = (k: 'pos' | 'neg' | 'neu') => groups[k].filter((r) => r.kind === 'news').length
+  const list = (k: 'pos' | 'neg' | 'neu') => (
+    <ol className="feed" aria-busy={loading}>
+      {groups[k].map((r) => (
+        <li key={r.kind === 'news' ? `n${r.n.id}` : `p${r.a.id}`}>
+          {r.kind === 'news' ? <NewsCard n={r.n} me={me} fresh={freshIds.has(r.n.id)} /> : <PriceCardSmall a={r.a} me={me} />}
+        </li>
+      ))}
+      {groups[k].length === 0 && <li className="col-empty">Nothing here yet.</li>}
+    </ol>
+  )
+  const TITLES = { pos: 'Positive', neg: 'Negative', neu: 'Neutral / watch' }
+  return (
+    <>
+      <div className="col-tabs" role="tablist" aria-label="News columns">
+        {(['pos', 'neg', 'neu'] as const).map((k) => (
+          <button key={k} role="tab" aria-selected={tab === k} className={`col-tab t-${k}`} onClick={() => setTab(k)}>
+            {TITLES[k]} <span className="count">{count(k)}</span>
+          </button>
+        ))}
+      </div>
+      <div className={`columns${neuCollapsed ? ' neu-collapsed' : ''}`} data-tab={tab} aria-live="polite">
+        <section className="col col-pos" aria-labelledby="h-pos">
+          <h2 id="h-pos" className="col-head"><span className="col-dot" aria-hidden="true">▲</span>Positive <span className="count">{count('pos')}</span></h2>
+          {list('pos')}
+        </section>
+        <section className="col col-neg" aria-labelledby="h-neg">
+          <h2 id="h-neg" className="col-head"><span className="col-dot" aria-hidden="true">▼</span>Negative <span className="count">{count('neg')}</span></h2>
+          {list('neg')}
+        </section>
+        <section className="col col-neu" aria-labelledby="h-neu">
+          <h2 id="h-neu" className="col-head">
+            <button type="button" className="col-toggle" aria-expanded={!neuCollapsed} onClick={toggleNeu}
+              title={neuCollapsed ? 'Expand' : 'Collapse'}>{neuCollapsed ? '◂' : '▸'}</button>
+            <span className="col-neu-title">Neutral / watch <span className="count">{count('neu')}</span></span>
+          </h2>
+          {!neuCollapsed && list('neu')}
+        </section>
+      </div>
+    </>
   )
 }
 
@@ -148,7 +231,6 @@ export default function NewsFeed({ me, pushedNews, pushedPrice, conn }:
     ? pushedPrice.filter((a) => a.id > base.price && priceMatches(a, filters)) : [], [pushedPrice, base, filters, layer])
   const freshIds = useMemo(() => new Set(liveNews.map((n) => n.id)), [liveNews])
 
-  type Row = { kind: 'news'; t: number; n: NewsAlert } | { kind: 'price'; t: number; a: Alert }
   const rows: Row[] = useMemo(() => {
     const seenN = new Set<number>(), seenP = new Set<number>()
     const out: Row[] = []
@@ -205,16 +287,6 @@ export default function NewsFeed({ me, pushedNews, pushedPrice, conn }:
                 {me.event_types.map((s) => <option key={s}>{s}</option>)}
               </select>
             </div>
-            <div className="field">
-              <span id="n-dir" style={{ fontSize: 12, color: 'var(--text-muted)' }}>Direction</span>
-              <div className="seg" role="group" aria-labelledby="n-dir">
-                {(['', 'up', 'down'] as const).map((d) => (
-                  <button key={d} type="button" aria-pressed={filters.direction === d} onClick={() => set({ direction: d })}>
-                    {d === '' ? 'Both' : d === 'up' ? '▲ Up' : '▼ Down'}
-                  </button>
-                ))}
-              </div>
-            </div>
             <div className="field grow">
               <label htmlFor="n-q">Search past alerts</label>
               <input id="n-q" type="search" placeholder="Headline, ticker or company" value={qInput}
@@ -230,13 +302,7 @@ export default function NewsFeed({ me, pushedNews, pushedPrice, conn }:
             <div className="empty">{active ? 'No alerts match these filters.'
               : 'No news alerts yet. They appear here as soon as a filing or headline is classified.'}</div>
           )}
-          <ol className="feed" aria-live="polite" aria-busy={loading}>
-            {rows.map((r) => (
-              <li key={r.kind === 'news' ? `n${r.n.id}` : `p${r.a.id}`}>
-                {r.kind === 'news' ? <NewsCard n={r.n} me={me} fresh={freshIds.has(r.n.id)} /> : <PriceCardSmall a={r.a} me={me} />}
-              </li>
-            ))}
-          </ol>
+          <Columns rows={rows} me={me} freshIds={freshIds} loading={loading} />
           {more && <div className="more"><button className="btn" onClick={loadMore}>Load older news alerts</button></div>}
         </>
       )}

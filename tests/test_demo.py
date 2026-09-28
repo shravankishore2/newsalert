@@ -100,3 +100,32 @@ async def test_demo_replays_archived_news_with_prices_on_archive_days(tmp_path):
     assert day3 and links == [(day3[0][0], 1)]
     assert out.get_status()["replay"]["value"]["news_archive"]["emitted"] == 1
     assert all(datetime.fromtimestamp(t, IST).date().day != 21 for (t,) in out.conn.execute("SELECT ts FROM alerts"))
+
+
+async def test_demo_copies_items_and_action_filings_for_the_boards(tmp_path):
+    import json
+    build_history(str(tmp_path / "h.db"), days=2)                       # 21, 22 Sep
+    archive = Store(str(tmp_path / "live.db"))
+    t = datetime(2026, 9, 22, 11, 0, tzinfo=IST).timestamp()
+    archive.conn.execute("INSERT INTO news_items (id, source, feed, key, url, headline, published_at, fetched_at, status, "
+                         "classifier, classification) VALUES (5, 'businessline', 'f', 'k5', 'https://example.test/5', "
+                         "'Alpha Q2 profit up 12%', ?, ?, 'classified', 'gemini', ?)",
+                         (t - 60, t, json.dumps({"event_type": "results", "confidence": 0.8, "affected": [],
+                                                 "results": {"profit_yoy_pct": 12}})))
+    archive.conn.execute("INSERT INTO news_alerts (id, item_id, mode, created_at, published_at, source, event_type, confidence, "
+                         "headline, url, classifier) VALUES (1, 5, 'live', ?, ?, 'businessline', 'results', 0.8, "
+                         "'Alpha Q2 profit up 12%', 'https://example.test/5', 'gemini')", (t, t - 60))
+    archive.conn.execute("INSERT INTO news_alert_stocks (news_alert_id, ticker, relation, direction) VALUES (1,'ALPHA','direct','up')")
+    archive.conn.execute("INSERT INTO news_items (source, feed, key, url, symbol_hint, label, action_kind, action_date, "
+                         "published_at, fetched_at, status) VALUES ('nse','f','k9','https://example.test/9','ALPHA',"
+                         "'Dividend','dividend','2026-10-15',?,?,'skipped')", (t + 600, t + 600))
+    archive.conn.commit()
+    d = DemoDriver(history_db=str(tmp_path / "h.db"), demo_db=str(tmp_path / "demo.db"), dataset=DATASET,
+                   alerts_cfg=CFG["alerts"], sleep=Sleeper(), news_db=str(tmp_path / "live.db"))
+    await d.run()
+    out = Store(str(tmp_path / "demo.db"))
+    item_id = out.conn.execute("SELECT item_id FROM news_alerts").fetchone()[0]
+    cls = json.loads(out.conn.execute("SELECT classification FROM news_items WHERE id=?", (item_id,)).fetchone()[0])
+    assert cls["results"]["profit_yoy_pct"] == 12
+    assert out.conn.execute("SELECT symbol_hint, action_kind, action_date FROM news_items WHERE action_kind IS NOT NULL"
+                            ).fetchall() == [("ALPHA", "dividend", "2026-10-15")]

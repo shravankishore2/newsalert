@@ -54,8 +54,10 @@ class DemoDriver:
         self.alerts = 0
         self.finished = False
         self.link_window_s = link_window_min * 60
+        self.action_items: list[dict] = []
         self.news: list[dict] = self._load_news(news_db) if news_db else []
         self.news_emitted = 0
+        self.action_emitted = 0
         self.days: set | None = None          # replay only these dates (None = all)
         if self.news:
             bar_days = sorted({datetime.fromtimestamp(t, self.tz).date() for (t,) in self.history.conn.execute(
@@ -69,6 +71,9 @@ class DemoDriver:
                 self.total_minutes = sum(1 for _ in self._minutes(count_only=True))
             self.news = [n for n in self.news if self.days is None or
                          datetime.fromtimestamp(n["created_at"], self.tz).date() >= min(self.days)]
+            if self.days is not None:
+                self.action_items = [a for a in self.action_items
+                                     if datetime.fromtimestamp(a["fetched_at"], self.tz).date() >= min(self.days)]
 
     def _publish(self, n_prices: int = 0, n_alerts: int = 0) -> None:
         now = self.clock()
@@ -105,24 +110,54 @@ class DemoDriver:
         try:
             if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='news_alerts'").fetchone():
                 return []
+            item_cols = {r[1] for r in conn.execute("PRAGMA table_info(news_items)")}
+            cols = [c.strip() for c in "source, feed, key, url, symbol_hint, headline, summary, label, action_kind, action_date, content_hash, published_at, fetched_at, status, classifier, classification, classified_at, error".split(",") if c.strip() in item_cols]
+            def item(item_id):
+                row = conn.execute(f"SELECT {', '.join(cols)} FROM news_items WHERE id=?", (item_id,)).fetchone()
+                return dict(row) if row else None
             out = []
             for n in conn.execute("SELECT * FROM news_alerts WHERE mode='live' ORDER BY created_at"):
                 d = dict(n)
                 d["stocks"] = [dict(s) for s in conn.execute(
                     "SELECT ticker, relation, direction, strength, reason FROM news_alert_stocks WHERE news_alert_id=?",
                     (n["id"],))]
+                d["item"] = item(n["item_id"])
                 out.append(d)
+            # corporate-action filings that never raised an alert (e.g. record dates) for the actions board
+            self.action_items = []
+            if "action_kind" in item_cols:
+                alerted = {d["item_id"] for d in out}
+                for r in conn.execute(f"SELECT id, {', '.join(cols)} FROM news_items WHERE action_kind IS NOT NULL "
+                                      "ORDER BY fetched_at"):
+                    if r["id"] not in alerted:
+                        self.action_items.append({k: r[k] for k in cols})
             return out
         finally:
             conn.close()
 
+    def _copy_item(self, it: dict | None) -> int | None:
+        """Copy an archived news item (derived fields only for NSE, as archived) into the demo db."""
+        if not it:
+            return None
+        cols = list(it)
+        cur = self.out.conn.execute(f"INSERT OR IGNORE INTO news_items ({', '.join(cols)}) VALUES "
+                                    f"({', '.join('?' * len(cols))})", [it[c] for c in cols])
+        if cur.rowcount:
+            return cur.lastrowid
+        row = self.out.conn.execute("SELECT id FROM news_items WHERE key=?", (it["key"],)).fetchone()
+        return row[0] if row else None
+
     def _emit_news(self, upto: float) -> None:
+        while self.action_emitted < len(self.action_items) and self.action_items[self.action_emitted]["fetched_at"] <= upto:
+            self._copy_item(self.action_items[self.action_emitted])
+            self.action_emitted += 1
         while self.news_emitted < len(self.news) and self.news[self.news_emitted]["created_at"] <= upto:
             n = self.news[self.news_emitted]
+            item_id = self._copy_item(n.get("item")) or n["item_id"]
             cur = self.out.conn.execute(
                 """INSERT INTO news_alerts (item_id, mode, created_at, published_at, source, event_type, confidence,
                    headline, url, classifier) VALUES (?,?,?,?,?,?,?,?,?,?)""",
-                (n["item_id"], "demo", n["created_at"], n["published_at"], n["source"], n["event_type"],
+                (item_id, "demo", n["created_at"], n["published_at"], n["source"], n["event_type"],
                  n["confidence"], n["headline"], n["url"], n["classifier"]))
             for st in n["stocks"]:
                 self.out.conn.execute("INSERT INTO news_alert_stocks (news_alert_id, ticker, relation, direction, strength, "
@@ -171,7 +206,7 @@ class DemoDriver:
                 else:
                     await self.sleep(gap / self.speed)
             self.sim_ts, self.market_open = ts, True
-            if self.news:
+            if self.news or self.action_items:
                 self._emit_news(ts)
             n = self._process(ts, group)
             self.minutes_done += 1

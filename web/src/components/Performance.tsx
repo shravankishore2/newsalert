@@ -3,7 +3,7 @@ import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { api, type ResultSection } from '../api'
 
-export default function Results() {
+export default function Performance() {
   const [sections, setSections] = useState<ResultSection[] | null>(null)
   const [error, setError] = useState('')
   useEffect(() => { api.results().then((r) => setSections(r.sections)).catch((e) => setError(String(e))) }, [])
@@ -14,7 +14,7 @@ export default function Results() {
 
   return (
     <>
-      <div className="feed-head"><h1>Replay results</h1><span className="muted">from docs/RESULTS.md</span></div>
+      <div className="feed-head"><h1>Model performance</h1><span className="muted">event study and replay results, from docs/RESULTS.md</span></div>
       {sections.map((s) => (
         <section className="results-section" key={s.key} aria-labelledby={`r-${s.key}`}>
           <h2 id={`r-${s.key}`}>{s.title}</h2>

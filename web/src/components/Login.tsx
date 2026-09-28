@@ -19,7 +19,7 @@ export default function Login({ onDone }: { onDone: () => void }) {
   return (
     <div className="login">
       <form onSubmit={submit}>
-        <h1>Market Alerts</h1>
+        <h1>QuantRadar</h1>
         <p>Private dashboard. The news sources' licences allow personal use only, so it needs a password.</p>
         <label className="sr-only" htmlFor="pw">Password</label>
         <input id="pw" type="password" autoComplete="current-password" autoFocus placeholder="Password"

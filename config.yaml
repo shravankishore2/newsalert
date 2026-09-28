@@ -1,4 +1,4 @@
-# News Monitor configuration (NSE). Secrets live in .env, not here.
+# QuantRadar configuration (NSE). Secrets live in .env, not here.
 
 tickers_file: tickers.csv          # Nifty 500 constituents with Dhan security IDs
 db_path: data/alerts.db            # live alerts, live quotes
@@ -77,6 +77,12 @@ news:
     - name: BusinessLine companies
       source: businessline
       url: https://www.thehindubusinessline.com/companies/feeder/default.rss
+  expectations:
+    # Optional (FINNHUB_API_KEY): Finnhub free earnings calendar, personal-use terms. Indian-symbol
+    # coverage on the free tier is unverified until a key is configured.
+    base_url: https://finnhub.io/api/v1
+    per_minute: 30             # free tier allows 60/min
+    symbol_suffix: ".NS"       # Finnhub's NSE symbol format, e.g. RELIANCE.NS
   gemini:
     model: gemini-3.5-flash-lite
     base_url: https://generativelanguage.googleapis.com/v1beta

@@ -60,6 +60,8 @@ CREATE TABLE IF NOT EXISTS news_items (
     headline TEXT,                   -- NULL for NSE (its text is never stored)
     summary TEXT,                    -- feed summary if provided; NULL for NSE
     label TEXT,                      -- NSE: derived label, e.g. "Order/contract win"
+    action_kind TEXT,                -- NSE: dividend | bonus | split | buyback | record date
+    action_date TEXT,                -- NSE: ISO date stated in the filing (a fact, not its text)
     content_hash TEXT,
     published_at REAL,
     fetched_at REAL NOT NULL,
@@ -113,6 +115,16 @@ CREATE TABLE IF NOT EXISTS price_news_links (
     minutes_after REAL NOT NULL,
     PRIMARY KEY (price_alert_id, news_alert_id)
 );
+CREATE TABLE IF NOT EXISTS earnings_expectations (
+    symbol TEXT NOT NULL,
+    report_date TEXT NOT NULL,
+    quarter INTEGER, year INTEGER,
+    eps_estimate REAL, eps_actual REAL,
+    revenue_estimate REAL, revenue_actual REAL,
+    source TEXT NOT NULL,
+    fetched_at REAL NOT NULL,
+    PRIMARY KEY (symbol, report_date)
+);
 CREATE TABLE IF NOT EXISTS api_usage (
     provider TEXT NOT NULL,
     day TEXT NOT NULL,
@@ -127,7 +139,8 @@ CREATE TABLE IF NOT EXISTS status (
 """
 
 # Columns added after the first release; ALTERed into older databases on open.
-_MIGRATIONS = {"alerts": ["fast_sma REAL", "slow_sma REAL", "fast_move REAL", "residual REAL"]}
+_MIGRATIONS = {"alerts": ["fast_sma REAL", "slow_sma REAL", "fast_move REAL", "residual REAL"],
+               "news_items": ["action_kind TEXT", "action_date TEXT"]}
 
 
 class Store:

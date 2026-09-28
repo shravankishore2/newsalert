@@ -1,4 +1,7 @@
-# News Monitor (NSE)
+# QuantRadar
+
+News-first market alerts for NSE (Nifty 500). The code and GitHub repo are named `newsalert`;
+the app is QuantRadar.
 
 News-first market alerts for the Nifty 500.
 
@@ -38,6 +41,7 @@ cp .env.example .env   # then fill in the values below
 | `DHAN_ACCESS_TOKEN` | *Alternative* to PIN + TOTP: a token from web.dhan.co. Used until it expires (24 h) and not refreshed automatically |
 | `DASHBOARD_PASSWORD` | Dashboard login (single user). Required for `serve`; `demo` generates and prints one if unset |
 | `GEMINI_API_KEY` | Classifies BusinessLine headlines (aistudio.google.com/apikey). Without it, BusinessLine items stay pending; NSE filings are still classified by rules |
+| `FINNHUB_API_KEY` | *Optional.* Earnings expectations for the Results board (free, personal-use terms). Without it the board shows stated figures or the stock reaction |
 
 Dhan account prerequisites:
 
@@ -71,40 +75,89 @@ A FastAPI backend (`newsalert/web/`) serves the React (Vite) frontend in `web/` 
 JSON API. It only **reads** SQLite; live mode or the demo driver writes alerts and
 status there. It listens on `127.0.0.1:8000` (`dashboard.host`/`port` in `config.yaml`).
 
-What it shows:
+Three tabs: **Alerts**, **Results**, **Model performance**.
 
-- **News alerts lead the feed.** Each card shows:
-  - The event type, the source, and the headline. NSE filings show a derived label,
-    since NSE's text isn't stored.
-  - The affected stocks, each with ▲/▼ plus the words up/down, its relation (direct,
-    competitor, supplier, customer, sector peer), strength, and a one-line reason.
-  - Classification confidence, and how long after publication we alerted.
-  - Any linked price moves.
-- **Layers.** A switch shows **News**, **News + price moves** (interleaved, with price
-  moves as a secondary card) or **Price moves** only. Filters cover ticker, sector,
-  direction, event type, and search over headlines, tickers and company names. The
-  switch remembers your choice.
-- **News detail.**
-  - The headline, with a link to the publisher or the NSE filing.
-  - Who classified it (Gemini or rules), with confidence, and each affected stock's
-    reason.
-  - Once the session has closed, the event-study returns vs NIFTY 50 (+15 min, +1 h,
-    close) and whether each call hit.
-  - Linked price moves, and a chart of the first stock vs NIFTY 50 around the alert.
-- **Price-move alerts.** Ticker, direction, move %, and *why the alert passed* each
-  filter (the SMAs, correlation, beta and index-adjusted move), with a link to the news
-  alert it followed, if any.
-- **Alert detail.** The move, the price, NIFTY 50 over the same window, the filter
-  reasons in plain language, and a chart of the stock and NIFTY 50 from an hour before
-  the reference price. The chart shows % change on one shared axis, with a hover
-  tooltip and a data-table view. Matching news shows **headline, source and link only**.
-  Article text is never stored or shown, and links open on the publisher's site.
-- **Status bar.** Market open/closed (next open when closed), the last price cycle and
-  how many prices it got, Dhan token state and time left, the news service (last poll,
-  feed health, alerts today, items waiting, and Gemini's requests used or paused), and
-  the push connection.
-- **Results page.** The false-alert tiles (rate, 95% CI, n) parsed from
-  `docs/RESULTS.md`, with each market's full section rendered below.
+**Alerts: the news feed, in columns.**
+
+- **Positive** (green) and **Negative** (red) sit side by side, with a slimmer,
+  collapsible **Neutral / watch** column for alerts with no direction. Each column shows
+  its count, and cards have a tinted background and border, readable in dark mode too.
+  The feed uses the full screen width. On phones the columns become tabs (Positive ·
+  Negative · Neutral, with counts).
+- **Column placement:** an alert goes into a column by the direction of its **headline
+  company**, meaning the first "direct" stock, or the first stock if there's none.
+- **Each card shows the company once**, as "Full name · TICKER", then the event (badge
+  plus headline). NSE filings show a label only when it adds information beyond the
+  badge, e.g. "Bonus issue" or "Key resignation (CEO/CFO/auditor)".
+- **Strength and confidence share one badge**, e.g. "High · 80%", or "Low · rules" for
+  NSE filings.
+- **Chips appear only for the other affected stocks** (competitors, suppliers,
+  customers, sector peers), never repeating the headline company. The Gemini reason and
+  any linked price moves follow.
+- **Layers:** **News**, **News + price moves** (price moves drop into the matching
+  column as smaller cards) or **Price moves** only (the filterable price-alert feed).
+  Filters cover ticker, sector, event type and search. The layer and the Neutral
+  column's collapsed state are remembered.
+- **News detail** and **price-alert detail** pages are unchanged: classification and
+  reasons, the event study once the session closes, linked moves, a chart vs NIFTY 50,
+  and headline, source and link only.
+
+**Results: a company events board.**
+
+- **Earnings results.** One card per company that reported (merging its BusinessLine
+  headline and NSE filing), with:
+  - A short briefing.
+  - A speedometer gauge from strong miss to strong beat.
+  - The stock's reaction vs NIFTY 50 at +15 min, +1 h and close. During the session
+    these are computed live and marked "so far"; after the event study runs they're
+    final.
+  - A **Basis** line on every card saying exactly what the gauge shows:
+    1. **Expected vs actual:** EPS and revenue estimates from Finnhub's free earnings
+       calendar, with the surprise % and a verdict. Only when `FINNHUB_API_KEY` is set
+       (see *Earnings data* below).
+    2. **Actual vs same quarter last year:** profit, revenue and EPS as **stated in the
+       BusinessLine headline or summary**, extracted by Gemini only when written there
+       (growth figures not found in the text are dropped). The gauge then shows the
+       stock reaction and says so.
+    3. **Stock reaction only:** when neither is available. The gauge is labelled
+       "Stock reaction vs NIFTY 50 (not an earnings verdict)".
+  - **Expectations are never invented.** When none are configured, a notice at the top
+    explains why.
+- **Corporate actions.** Dividends, bonus issues, splits, buybacks and record dates from
+  NSE filings (last 30 days), classified by rules, with upcoming dates first. A date is
+  shown only when the filing states one; only that date is stored, not NSE's text. Debt
+  housekeeping (commercial paper, NCD interest) is excluded.
+
+**Model performance.** The previous Results page, unchanged: the news event study and
+the price-alert replay results (false-alert rates, CIs) from `docs/RESULTS.md`.
+
+**Status bar.**
+- Market open/closed.
+- The last price cycle.
+- The Dhan token state.
+- The news service: last poll, feeds, alerts, pending items, Gemini's usage.
+- The push connection.
+
+### Earnings data: what's allowed (checked 2026-09-28)
+
+Analyst consensus estimates are usually paid data. What was found:
+
+| Source | Estimates for Nifty 500? | Terms / cost |
+|---|---|---|
+| **Finnhub**, `/calendar/earnings?international=true` | EPS and revenue estimate + actual. Not marked premium in Finnhub's API spec (free tier: "1 month of historical earnings and new updates"). Whether Indian symbols are returned on the free tier is **unverified** until a key is configured | Free; "strictly for personal use", no sharing of "data or derived results" with third parties. A single-user, password-protected dashboard fits |
+| Finnhub `/stock/eps-estimate`, `/stock/revenue-estimate` | Yes | "Premium Access Required" |
+| Twelve Data free (Basic) | 3 markets only | Licence: "internally for testing, evaluation, or development purposes only". Not permitted |
+| Alpha Vantage, Financial Modeling Prep | Not assessed: their sites couldn't be reached from this machine on 2026-09-28 | — |
+
+So QuantRadar supports Finnhub **optionally**:
+- **Setup:** set `FINNHUB_API_KEY` (free signup at finnhub.io) and restart the news
+  service. When a results alert fires, the service looks up that company
+  (`SYMBOL.NS`) in the earnings calendar, rate-limited to 30/min (the free tier allows
+  60).
+- **Without a key:** cards fall back to stated year-on-year figures, then to the
+  reaction, as described above.
+- **Don't share the dashboard password** if expectations are on: Finnhub's terms
+  forbid sharing derived results.
 
 ### Demo mode
 
@@ -200,10 +253,22 @@ npm --prefix web run lint
    its affected stocks (ticker, relation, direction, strength, reason) and an overall
    confidence.
    - **NSE filings: local rules, no LLM.** The filing subject maps to an event type,
-     and the only affected stock is the announcing company. A direction is given only
-     where the event implies one (for example, fraud/default → down, order win → up,
-     rating downgrade → down); otherwise it's left unknown. Confidence is fixed at 0.5.
-     Trading-window, AGM and other routine filings are "other" and don't alert.
+     and the only affected stock is the announcing company. Confidence is fixed at 0.5.
+     - **Routine filings are "other" and don't alert:** trading window, AGM
+       proceedings, analyst-meet schedules, staff share-option allotments, and
+       commercial-paper or NCD housekeeping.
+     - **Directions are given only where the subject makes them clear.** Refined on
+       2026-09-28 against that day's filings, which were analysed in memory and not
+       stored:
+       - Up: order and contract wins (press releases included), buybacks, bonus issues,
+         splits, dividends, and credit rating upgrades or positive outlooks.
+       - Down: fraud, default or insolvency; regulatory actions, penalties and exchange
+         fines; QIP, preferential or rights issues (dilution); CEO, CFO or auditor
+         resignations; and rating downgrades or negative outlooks.
+       - Left as no direction: results, acquisitions, other appointments or
+         resignations, and reaffirmed ratings.
+     - **Corporate actions:** the kind (dividend, bonus, split, buyback, record date)
+       and the date the filing states are kept as derived fields for the Results board.
    - **BusinessLine: Gemini** (`gemini-3.5-flash-lite`, structured JSON output).
      - **Validation:** Pydantic checks every reply; tickers not in `tickers.csv` are
        dropped and recorded.
@@ -237,7 +302,7 @@ files are in [`deploy/`](deploy/).
 | Unit | What it does |
 |---|---|
 | `newsalert-live.timer` | Fires at **09:10 IST, Monday–Friday** (`Persistent=true`, so a missed start runs at boot) |
-| `newsalert-live.service` | `ExecCondition=is-trading-window --until 15:35` skips NSE holidays and late starts without marking a failure. `ExecStartPre=token` makes sure the Dhan token lasts the session. `live --until 15:35` stops the monitor, with `RuntimeMaxSec=6h30min` as a backstop |
+| `newsalert-live.service` | `ExecCondition=is-trading-window --until 15:35` skips NSE holidays and late starts without marking a failure. `ExecStartPre=token` makes sure the Dhan token lasts the session. `live --until 15:35` stops the monitor (no fixed runtime limit: the monitor also starts at boot, so on 2026-09-28 a 6.5 h limit killed it mid-session). On any start it replays today's stored quotes into the engine, so a restart doesn't lose the 30-sample warm-up |
 | `newsalert-news.service` | Always on: news ingest, classification and news alerts (see *News pipeline*) |
 | `newsalert-evaluate.timer` | 15:50 IST on weekdays: event study, rewrites the news section of `docs/RESULTS.md` |
 | `newsalert-web.service` | Always-on dashboard over live data, on `127.0.0.1:8000` |
@@ -337,7 +402,8 @@ config.yaml / .env / tickers.csv
 | `newsalert/auth.py` | TOTP (RFC 6238), Dhan token generation, private token cache, log redaction |
 | `newsalert/market.py` | NSE calendar: IST session, weekends, trading holidays |
 | `newsalert/clients.py` | Dhan (LTP, intraday) and an RSS reader for the smoke test. All take an injected `httpx.AsyncClient` |
-| `newsalert/news/` | News-first pipeline: `ingest.py` (feeds, storage, alerts), `rules.py` (NSE rule classifier), `gemini.py` (BusinessLine classifier, quota), `models.py` (Pydantic schemas), `evaluate.py` (event study, RESULTS section) |
+| `newsalert/news/` | News-first pipeline: `ingest.py` (feeds, storage, alerts), `rules.py` (NSE rule classifier, corporate actions), `gemini.py` (BusinessLine classifier, stated results figures, quota), `expectations.py` (optional Finnhub earnings expectations), `models.py` (Pydantic schemas), `evaluate.py` (event study, RESULTS section) |
+| `newsalert/web/board.py` | Results board (earnings cards, gauge basis) and corporate-actions board |
 | `newsalert/history.py` | Dhan 1-minute history download with ≤90-day windows and a timestamp sanity check |
 | `newsalert/replay.py` | Replay, false-alert classification, latency percentiles, per-market RESULTS sections |
 | `newsalert/universe.py` | Nifty 500 CSV + Dhan scrip master → `tickers.csv` |

@@ -74,6 +74,7 @@ def _clean(text: str | None, limit: int) -> str | None:
 class NewsService:
     def __init__(self, *, http: httpx.AsyncClient, store: Store, feeds: list[Feed], tickers: dict[str, str],
                  gemini: GeminiClassifier | None, poll_s: float = 180, max_age_min: float = 120,
+                 expectations=None,
                  min_confidence: float = 0.0, mode: str = "live",
                  clock: Callable[[], float] = time.time,
                  sleep: Callable[[float], Awaitable[None]] = asyncio.sleep):
@@ -82,6 +83,8 @@ class NewsService:
         self.min_confidence, self.mode, self.clock, self.sleep = min_confidence, mode, clock, sleep
         self.last_error: str | None = None
         self.last_poll_at: float | None = None
+        self.expectations = expectations          # optional FinnhubEarnings
+        self._results_queue: list[tuple[str, float]] = []
 
     # -- ingest -------------------------------------------------------------------------------
     async def poll_feed(self, feed: Feed) -> int:
@@ -140,10 +143,11 @@ class NewsService:
                    "rejected_tickers": [] if in_universe or not symbol else [symbol]}
             cur = self.store.conn.execute(
                 """INSERT INTO news_items (source, feed, key, url, symbol_hint, headline, summary, label,
-                   content_hash, published_at, fetched_at, status, classifier, classification, classified_at, error)
-                   VALUES ('nse',?,?,?,?,NULL,NULL,?,NULL,?,?,?,'rules',?,?,?)""",
-                (feed.name, key, link, symbol, rr.label, published, now, status, json.dumps(cls), now,
-                 "stale" if stale else ("not in universe" if not in_universe else None)))
+                   action_kind, action_date, content_hash, published_at, fetched_at, status, classifier,
+                   classification, classified_at, error)
+                   VALUES ('nse',?,?,?,?,NULL,NULL,?,?,?,NULL,?,?,?,'rules',?,?,?)""",
+                (feed.name, key, link, symbol, rr.label, rr.action_kind, rr.action_date, published, now, status,
+                 json.dumps(cls), now, "stale" if stale else ("not in universe" if not in_universe else None)))
             if status == "classified":
                 self._alert(cur.lastrowid)
             return 1
@@ -236,7 +240,26 @@ class NewsService:
                 "INSERT INTO news_alert_stocks (news_alert_id, ticker, relation, direction, strength, reason) "
                 "VALUES (?,?,?,?,?,?)",
                 (cur.lastrowid, s["ticker"], s["relation"], s.get("direction"), s.get("strength"), s.get("reason")))
+        if cls["event_type"] == "results" and self.expectations is not None:
+            direct = [s["ticker"] for s in stocks if s["relation"] == "direct"] or [stocks[0]["ticker"]]
+            self._results_queue.append((direct[0], published or self.clock()))
         return cur.lastrowid
+
+    async def fetch_expectations(self) -> int:
+        """Look up earnings expectations for companies that just reported (optional, Finnhub)."""
+        if self.expectations is None:
+            return 0
+        from datetime import datetime as _dt
+        n, seen = 0, set()
+        while self._results_queue:
+            sym, ts = self._results_queue.pop(0)
+            day = _dt.fromtimestamp(ts, IST).date()
+            if (sym, day) in seen:
+                continue
+            seen.add((sym, day))
+            if await self.expectations.fetch(sym, day) is not None:
+                n += 1
+        return n
 
     # -- status + loop ----------------------------------------------------------------------------
     def publish_status(self) -> None:
@@ -257,6 +280,8 @@ class NewsService:
                 "paused_until": g.paused_until if g.paused_until > self.clock() else None,
                 "last_quota": g.last_quota or None},
             "gemini_configured": g is not None,
+            "expectations": None if self.expectations is None else {
+                "provider": "finnhub", "last_error": self.expectations.last_error},
             "last_error": self.last_error,
         }, now=self.clock())
 
@@ -265,6 +290,7 @@ class NewsService:
             await self.poll_feed(f)
         self.last_poll_at = self.clock()
         await self.classify_pending()
+        await self.fetch_expectations()
         self.publish_status()
 
     async def run(self, max_polls: int | None = None) -> None:
