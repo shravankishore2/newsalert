@@ -21,17 +21,16 @@ export default function App() {
   const [pushedNews, setPushedNews] = useState<NewsAlert[]>([])
   const route = useRoute()
 
-  const loadMe = useCallback(async () => {
-    try {
-      setMe(await api.me())
-      setAuth('in')
-    } catch (e) {
-      if (e instanceof Unauthorized) setAuth('out')
-      else throw e
-    }
-  }, [])
+  const loadMe = useCallback(() => api.me().then(
+    (m) => { setMe(m); setAuth('in') },
+    (e) => { if (e instanceof Unauthorized) setAuth('out'); else throw e },
+  ), [])
 
-  useEffect(() => { loadMe() }, [loadMe])
+  // Session check on mount; state is set only when the request settles.
+  useEffect(() => { void api.me().then(
+    (m) => { setMe(m); setAuth('in') },
+    (e) => { if (e instanceof Unauthorized) setAuth('out'); else throw e },
+  ) }, [])
 
   const onAlert = useCallback((a: Alert) => setPushed((p) => [a, ...p].slice(0, 500)), [])
   const onNews = useCallback((n: NewsAlert) => setPushedNews((p) => [n, ...p].slice(0, 500)), [])
