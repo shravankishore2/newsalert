@@ -50,7 +50,12 @@ class DemoDriver:
         self.sim_ts: int | None = None
         self.market_open = False
         self.minutes_done = 0
-        self.total_minutes = self.history.conn.execute("SELECT COUNT(DISTINCT ts) FROM bars").fetchone()[0]
+        # Minutes and days come from the index's own bars (primary-key lookup), never a scan of all
+        # ~12M rows: on 2026-09-28 such scans blocked the demo's web server for minutes (HTTP 502).
+        self._index_ts = [t for (t,) in self.history.conn.execute(
+            "SELECT ts FROM bars WHERE symbol = ? ORDER BY ts", (self.index,))]
+        self.bar_days = sorted({datetime.fromtimestamp(t, self.tz).date() for t in self._index_ts})
+        self.total_minutes = self._count_minutes(None)
         self.alerts = 0
         self.finished = False
         self.link_window_s = link_window_min * 60
@@ -60,15 +65,14 @@ class DemoDriver:
         self.action_emitted = 0
         self.days: set | None = None          # replay only these dates (None = all)
         if self.news:
-            bar_days = sorted({datetime.fromtimestamp(t, self.tz).date() for (t,) in self.history.conn.execute(
-                "SELECT DISTINCT ts FROM bars WHERE symbol = ?", (self.index,))})
+            bar_days = self.bar_days
             news_days = {datetime.fromtimestamp(n["created_at"], self.tz).date() for n in self.news}
             both = sorted(d for d in bar_days if d in news_days)
             if both:
                 warm = [d for d in bar_days if d < both[0]][-1:]
                 self.days = set(both) | set(warm)
                 self.warm_days = len(warm)
-                self.total_minutes = sum(1 for _ in self._minutes(count_only=True))
+                self.total_minutes = self._count_minutes(self.days)
             self.news = [n for n in self.news if self.days is None or
                          datetime.fromtimestamp(n["created_at"], self.tz).date() >= min(self.days)]
             if self.days is not None:
@@ -166,23 +170,31 @@ class DemoDriver:
             self.news_emitted += 1
         self.out.conn.commit()
 
-    def _minutes(self, count_only: bool = False):
-        cur_ts, group = None, []
-        for symbol, ts, price in self.history.iter_bars("bars", self.index, self.session):
-            if self.days is not None and datetime.fromtimestamp(ts, self.tz).date() not in self.days:
+    def _in_session(self, ts: int) -> bool:
+        if self.session is None:
+            return True
+        off, o, c = self.session
+        return o <= (ts + off) % 86400 < c
+
+    def _count_minutes(self, days) -> int:
+        return sum(1 for t in self._index_ts if self._in_session(t) and
+                   (days is None or datetime.fromtimestamp(t, self.tz).date() in days))
+
+    def _minutes(self):
+        """Replay minutes day by day (small indexed queries) instead of one sort over every bar."""
+        for day in self.bar_days:
+            if self.days is not None and day not in self.days:
                 continue
-            if count_only:
-                if ts != cur_ts:
-                    cur_ts = ts
-                    yield ts
-                continue
-            if ts != cur_ts and group:
+            start = int(datetime.combine(day, datetime.min.time(), self.tz).timestamp())
+            cur_ts, group = None, []
+            for symbol, ts, price in self.history.iter_bars("bars", self.index, self.session, start, start + 86400):
+                if ts != cur_ts and group:
+                    yield cur_ts, group
+                    group = []
+                cur_ts = ts
+                group.append((symbol, price))
+            if group:
                 yield cur_ts, group
-                group = []
-            cur_ts = ts
-            group.append((symbol, price))
-        if group:
-            yield cur_ts, group
 
     async def run(self) -> None:
         self.out.set_status("mode", {"mode": "demo", "run_id": self.run_id, "dataset": self.dataset["label"]})

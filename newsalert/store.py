@@ -251,11 +251,18 @@ class Store:
         off, o, c = session
         return " AND ((ts + ?) % 86400) >= ? AND ((ts + ?) % 86400) < ?", (off, o, off, c)
 
-    def iter_bars(self, table: str, index_symbol: str,
-                  session: tuple[int, int, int] | None = None) -> Iterator[tuple[str, int, float]]:
-        """All rows ordered by time, index symbol first within each timestamp."""
+    def iter_bars(self, table: str, index_symbol: str, session: tuple[int, int, int] | None = None,
+                  start: int | None = None, end: int | None = None) -> Iterator[tuple[str, int, float]]:
+        """Rows ordered by time, index symbol first within each timestamp; optionally only
+        start <= ts < end (uses the ts index, so a one-day slice is a small, fast sort)."""
         col = "close" if table == "bars" else "price"
         where, args = self._session_sql(session)
+        if start is not None:
+            where += " AND ts >= ?"
+            args += (start,)
+        if end is not None:
+            where += " AND ts < ?"
+            args += (end,)
         yield from self.conn.execute(
             f"SELECT symbol, ts, {col} FROM {table} WHERE 1=1{where} "
             "ORDER BY ts, CASE WHEN symbol=? THEN 0 ELSE 1 END, symbol", (*args, index_symbol))
