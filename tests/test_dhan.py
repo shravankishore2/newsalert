@@ -156,5 +156,7 @@ async def test_fetch_history_retries_transient_failures_once():
     store = Store(":memory:")
     http, dhan = make(fake, clock, flaky)
     async with http:
-        rep = await fetch_history(store, dhan, [Instrument("RELIANCE", "2885", "NSE_EQ", "EQUITY")], days=5, now=T)
+        rep = await fetch_history(store, dhan, [Instrument("RELIANCE", "2885", "NSE_EQ", "EQUITY")], days=5, now=T,
+                                  sleep=clock.sleep)
     assert rep["retried"] == 1 and rep["failed"] == [] and rep["bars"] == 2
+    assert 30 in clock.sleeps                    # paused before the retry pass

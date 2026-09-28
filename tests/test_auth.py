@@ -220,3 +220,28 @@ async def test_running_process_adopts_token_refreshed_by_another(tmp_path):
         assert monitor.token.access_token == "tok-2" and fake.token_n == 2
         monitor.invalidate()                           # tok-2 rejected too -> nothing usable cached
         assert monitor.token is None
+
+
+async def test_invalid_totp_retried_with_next_code(tmp_path):
+    clock = FakeClock(T + timedelta(seconds=5))      # 5 s into a 30 s window
+    replies = [{"status": "error", "message": "Invalid TOTP"}, {"status": "error", "message": "Invalid TOTP"}]
+    codes = []
+
+    def h(req):
+        from urllib.parse import parse_qs
+        codes.append(parse_qs(req.url.query.decode())["totp"][0])
+        if replies:
+            return httpx.Response(200, json=replies.pop(0))
+        return httpx.Response(200, json={"accessToken": "tok-ok", "expiryTime": "2026-09-29T08:45:00"})
+
+    http = httpx.AsyncClient(transport=httpx.MockTransport(h))
+    auth = DhanAuth(http, CLIENT_ID, PIN, SECRET, None, clock=clock, sleep=clock.sleep)
+    async with http:
+        tok = await auth.generate()
+    assert tok.access_token == "tok-ok" and len(codes) == 3
+    assert len(set(codes)) == 3                      # a new code each time, never a resend
+    replies[:] = [{"status": "error", "message": "Invalid PIN"}]
+    async with httpx.AsyncClient(transport=httpx.MockTransport(h)) as http2:
+        auth2 = DhanAuth(http2, CLIENT_ID, PIN, SECRET, None, clock=clock, sleep=clock.sleep)
+        with pytest.raises(AuthError, match="Invalid PIN"):
+            await auth2.generate()                   # other errors are not retried

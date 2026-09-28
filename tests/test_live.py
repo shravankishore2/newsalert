@@ -119,3 +119,22 @@ async def test_token_rejection_published_to_status():
     st = mon.store.get_status()
     assert st["token"]["value"]["state"] == "error" and "token rejected" in st["token"]["value"]["error"]
     assert st["cycle"]["value"]["error"]
+
+
+async def test_warm_start_restores_engine_state_after_restart():
+    """A restart mid-session replays today's stored quotes, so alerts can fire right away."""
+    clock, fake, http, mon = setup(datetime(2026, 10, 1, 10, 0, tzinfo=IST))
+    async with http:
+        for _ in range(8):                       # 8 minutes of history, then the process "restarts"
+            await mon.run_cycle()
+            clock.t += 60
+    clock2, fake2, http2, mon2 = setup(datetime(2026, 10, 1, 10, 0, tzinfo=IST))
+    mon2.store = mon.store
+    clock2.t = clock.t
+    assert mon2.warm_start() == 8 * 3
+    assert len(mon2.engine.series["ALPHA"].ts) == 8 and mon2.engine.last_alert == {}
+    fake2.prices = dict(fake.prices)
+    fake2.prices[("NSE_EQ", "101")] = 105.0      # +5% on the first live cycle after the restart
+    async with http2:
+        s = await mon2.run_cycle()
+    assert s.alerts == 1                         # without warm start: 0 (warm-up not reached)

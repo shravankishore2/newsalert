@@ -39,7 +39,8 @@ def session_fraction(ts_list: list[int], open_t: time, close_t: time) -> float:
 
 async def fetch_history(store: Store, dhan: DhanClient, instruments: list[Instrument], days: int,
                         now: datetime, *, concurrency: int = 4, open_t: time = time(9, 15),
-                        close_t: time = time(15, 30)) -> dict:
+                        close_t: time = time(15, 30), retry_pause_s: float = 30,
+                        sleep=asyncio.sleep) -> dict:
     end = now.astimezone(IST)
     start = end - timedelta(days=days)
     windows = chunks(start, end)
@@ -77,7 +78,9 @@ async def fetch_history(store: Store, dhan: DhanClient, instruments: list[Instru
 
     await asyncio.gather(*(worker() for _ in range(concurrency)))
     if failed_ins:
-        # Transient network errors (resets, timeouts) are common on long runs: one more pass.
+        # Transient network errors (resets, timeouts) and rate limits are common on long runs:
+        # one more pass after a pause (on 2026-09-28 an immediate retry hit the rate limit again).
+        await sleep(retry_pause_s)
         report["retried"] = len(failed_ins)
         report["failed"] = []
         for ins in failed_ins:

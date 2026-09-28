@@ -18,8 +18,8 @@ ExecStartPre=/home/ubuntu/newsalert/.venv/bin/python -m newsalert token
 ExecStart=/home/ubuntu/newsalert/.venv/bin/python -m newsalert live --until 15:35
 Restart=on-failure
 RestartSec=30
-# Backstop in case --until never triggers: 09:10 + 6.5 h = 15:40.
-RuntimeMaxSec=6h30min
+# No RuntimeMaxSec: it counts from service start, and the monitor also starts at boot (e.g. 02:00),
+# so a fixed runtime killed it mid-session on 2026-09-28. `live --until 15:35` is the stop.
 NoNewPrivileges=yes
 PrivateTmp=yes
 

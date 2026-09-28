@@ -150,9 +150,30 @@ class LiveMonitor:
                 return
             await self.sleep(min(left, 3600))
 
+    def warm_start(self, lookback_s: float = 3 * 3600) -> int:
+        """Feed the engine today's stored quotes so a restart mid-session doesn't lose the
+        30-sample warm-up (on 2026-09-28 a restart at 15:01 silenced alerts until ~15:31).
+        Returns the number of samples replayed; no alerts are raised for them."""
+        now = self.clock()
+        rows = self.store.conn.execute(
+            "SELECT symbol, ts, price FROM quotes WHERE ts > ? AND ts <= ? "
+            "ORDER BY ts, CASE WHEN symbol = ? THEN 0 ELSE 1 END", (now - lookback_s, now, self.index.symbol)).fetchall()
+        wanted = {i.symbol for i in self.instruments}
+        n = 0
+        for sym, ts, px in rows:
+            if sym in wanted:
+                self.engine.on_price(sym, ts, px)   # alerts from history are discarded, not dispatched
+                n += 1
+        # alerts the engine "fired" during warm-up set cooldowns; clear them so live moves can alert
+        self.engine.last_alert.clear()
+        if n:
+            log.info("warm start: replayed %d stored quotes from the last %.0f min", n, lookback_s / 60)
+        return n
+
     async def run(self, max_cycles: int | None = None, stop_after: datetime | None = None) -> None:
         n = 0
         refreshed_for: datetime | None = None
+        self.warm_start()
         self.store.set_status("mode", {"mode": "live", "run_id": self.run_id}, now=self.clock())
         self.publish_token_status()
         while max_cycles is None or n < max_cycles:

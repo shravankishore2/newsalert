@@ -158,9 +158,23 @@ class DhanAuth:
     def can_generate(self) -> bool:
         return bool(self._pin and self._secret)
 
-    async def generate(self) -> Token:
+    async def generate(self, attempts: int = 3) -> Token:
+        """Generate a token via TOTP. Dhan intermittently answers "Invalid TOTP" to a correct,
+        in-sync code (seen on 2026-09-27/28, cause unknown); each retry waits for the next 30 s
+        code rather than resending the same one."""
         if not self.can_generate:
             raise AuthError("cannot generate a Dhan token: DHAN_PIN and DHAN_TOTP_SECRET are not set")
+        for attempt in range(1, attempts + 1):
+            try:
+                return await self._generate_once()
+            except AuthError as e:
+                if "Invalid TOTP" not in str(e) or attempt == attempts:
+                    raise
+                log.warning("Dhan rejected the TOTP code (attempt %d/%d); retrying with the next code", attempt, attempts)
+                await self._sleep(30 - (self.clock() % 30) + 1.0)
+        raise AssertionError("unreachable")
+
+    async def _generate_once(self) -> Token:
         # Dhan accepts only the current 30 s code. A code computed in the last few seconds of its
         # window can expire in flight ("Invalid TOTP"), so wait for a fresh window in that case.
         left = 30 - (self.clock() % 30)
