@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import Link from './Link'
 import { api, fmtDate, fmtTime, money, pct, tzAbbr, type AlertDetail as Detail, type Me } from '../api'
 import { Direction } from './Feed'
 import PriceChart from './PriceChart'
@@ -10,14 +11,14 @@ export default function AlertDetail({ me, id }: { me: Me; id: number }) {
   // App renders this with key={id}, so each alert gets fresh state
   useEffect(() => { api.alert(id).then(setA).catch((e) => setError(String(e))) }, [id])
 
-  if (error) return <><a className="back" href="#/">← All alerts</a><div className="empty error">{error}</div></>
+  if (error) return <><Link className="back" to="/">← All alerts</Link><div className="empty error">{error}</div></>
   if (!a) return <p className="muted">Loading…</p>
   const tz = me.timezone
   const mins = Math.round((a.ts - a.ref_ts) / 60)
 
   return (
     <>
-      <a className="back" href="#/">← All alerts</a>
+      <Link className="back" to="/">← All alerts</Link>
       <div className="detail-head">
         <h1>{a.symbol}</h1>
         <span className="secondary">{a.name}{a.sector ? ` · ${a.sector}` : ''}</span>

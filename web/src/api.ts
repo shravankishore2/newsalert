@@ -45,6 +45,8 @@ export type NewsStock = {
 
 export type NewsAlert = {
   id: number
+  item_id: number
+  summary: string | null
   mode: 'live' | 'demo'
   created_at: number
   published_at: number | null

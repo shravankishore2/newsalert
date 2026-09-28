@@ -1,15 +1,18 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, type MouseEvent } from 'react'
 import {
-  api, fmtDate, fmtDuration, fmtTime, pct, SOURCE_LABEL, tzAbbr,
+  api, fmtDate, fmtDuration, fmtTime, pct, tzAbbr,
   type Alert, type Me, type NewsAlert, type NewsStock,
 } from '../api'
 import type { Conn } from '../stream'
 import Feed, { Direction } from './Feed'
-import { columnOf, primaryStock } from '../news'
+import Link from './Link'
+import { columnOf, primaryStock, threadNews, type Thread } from '../news'
 
 type Layer = 'news' | 'both' | 'price'
-type Filters = { symbol: string; sector: string; direction: '' | 'up' | 'down'; event_type: string; q: string }
-const EMPTY: Filters = { symbol: '', sector: '', direction: '', event_type: '', q: '' }
+type Filters = { sector: string; event_type: string; q: string }
+const EMPTY: Filters = { sector: '', event_type: '', q: '' }
+const VIEW_TITLE: Record<Layer, string> = { news: 'News alerts', both: 'News & price moves', price: 'Price-move alerts' }
+const SOURCE_NAME: Record<string, string> = { nse: 'NSE', businessline: 'BusinessLine' }
 
 const LAYER_KEY = 'quantradar.layer'
 function initialLayer(): Layer {
@@ -21,22 +24,17 @@ function initialLayer(): Layer {
 
 function newsMatches(n: NewsAlert, f: Filters) {
   if (f.event_type && n.event_type !== f.event_type) return false
-  const stocks = n.stocks.filter((s) =>
-    (!f.symbol || s.ticker === f.symbol.toUpperCase()) && (!f.sector || s.sector === f.sector) &&
-    (!f.direction || s.direction === f.direction))
-  if ((f.symbol || f.sector || f.direction) && stocks.length === 0) return false
+  if (f.sector && !n.stocks.some((s) => s.sector === f.sector)) return false
   if (f.q) {
     const q = f.q.toLowerCase()
-    const hay = [n.headline ?? '', ...n.stocks.flatMap((s) => [s.ticker, s.name])].join(' ').toLowerCase()
+    const hay = [n.headline ?? '', n.summary ?? '', ...n.stocks.flatMap((s) => [s.ticker, s.name])].join(' ').toLowerCase()
     if (!hay.includes(q)) return false
   }
   return true
 }
 
 function priceMatches(a: Alert, f: Filters) {
-  if (f.symbol && a.symbol !== f.symbol.toUpperCase()) return false
   if (f.sector && a.sector !== f.sector) return false
-  if (f.direction && (a.direction > 0 ? 'up' : 'down') !== f.direction) return false
   if (f.q && ![a.symbol, a.name].join(' ').toLowerCase().includes(f.q.toLowerCase())) return false
   return true
 }
@@ -56,78 +54,110 @@ export function EventBadge({ type }: { type: string }) {
   return <span className="event-badge">{type}</span>
 }
 
-/** One compact badge instead of separate strength / relation / confidence tags. */
-export function StrengthBadge({ n }: { n: NewsAlert }) {
-  const p = primaryStock(n)
-  const strength = p?.strength ? p.strength[0].toUpperCase() + p.strength.slice(1) : '—'
-  const conf = n.classifier === 'rules' ? 'rules' : n.confidence !== null ? `${Math.round(n.confidence * 100)}%` : ''
-  return <span className={`strength s-${p?.strength ?? 'none'}`}
-    title={`Strength ${strength.toLowerCase()} · ${n.classifier === 'rules' ? 'classified by NSE filing rules' : `classification confidence ${conf}`}`}>
-    {strength}{conf ? ` · ${conf}` : ''}</span>
+/** The card's focal point: direction in strong colour, plus the expected impact strength. */
+export function ImpactBadge({ s }: { s: NewsStock | undefined }) {
+  const d = s?.direction
+  const strength = s?.strength ? s.strength[0].toUpperCase() + s.strength.slice(1) : null
+  const label = d === 'up' ? 'Up' : d === 'down' ? 'Down' : 'Neutral'
+  return (
+    <span className={`impact impact-${d ?? 'none'}`} title="Expected direction and impact strength for the headline company">
+      <span aria-hidden="true">{d === 'up' ? '▲' : d === 'down' ? '▼' : '•'}</span>
+      {label}{strength && <> · {strength}<span className="impact-word"> impact</span></>}
+    </span>
+  )
 }
 
-// Rule labels that only restate the event type; the badge already says it.
+// Rule labels that only restate the event type (the badge already says it).
 const GENERIC_NSE_LABELS = new Set(['financial results', 'regulatory action/order', 'management change', 'order/contract win',
   'credit rating update', 'merger/acquisition filing', 'capital raise/allotment', 'fraud/default/legal filing',
   'dividend/buyback', 'guidance/outlook', 'other filing'])
 
-function eventLine(n: NewsAlert, p: NewsStock | undefined): string | null {
-  if (n.source === 'nse' && n.headline) {
-    // NSE alerts carry "TICKER: Label"; the company is in the header, and generic labels repeat the badge
-    const label = p && n.headline.startsWith(`${p.ticker}: `) ? n.headline.slice(p.ticker.length + 2) : n.headline
-    return GENERIC_NSE_LABELS.has(label.toLowerCase()) ? null : label
+function headlineOf(n: NewsAlert, p: NewsStock | undefined): string {
+  if (n.source === 'nse') {
+    const raw = n.headline ?? ''
+    const label = p && raw.startsWith(`${p.ticker}: `) ? raw.slice(p.ticker.length + 2) : raw
+    return GENERIC_NSE_LABELS.has(label.toLowerCase()) || !label ? 'Exchange filing' : `Exchange filing: ${label}`
   }
   return n.headline ?? '(no headline)'
 }
 
-function NewsCard({ n, me, fresh }: { n: NewsAlert; me: Me; fresh: boolean }) {
+function NewsCard({ thread, me, fresh }: { thread: Thread; me: Me; fresh: boolean }) {
+  const [expanded, setExpanded] = useState(false)
+  const [open, setOpen] = useState(false)
+  const n = thread.items[0]
   const tz = me.timezone
   const p = primaryStock(n)
   const others = n.stocks.filter((s) => s !== p && s.ticker !== p?.ticker)
   const col = columnOf(n)
+  const summary = n.summary ?? (n.classifier === 'gemini' ? p?.reason ?? null : null)
+  const long = (summary?.length ?? 0) > 150
+  const stop = (fn: () => void) => (e: MouseEvent) => { e.preventDefault(); e.stopPropagation(); fn() }
   return (
-    <a className={`news-card tone-${col}${fresh ? ' fresh' : ''}`} href={`#/news/${n.id}`}>
-      <div className="nc-head">
-        <span className="nc-company">{p?.name || p?.ticker || 'Market'}{p && <span className="nc-ticker"> · {p.ticker}</span>}</span>
-        <StrengthBadge n={n} />
-      </div>
-      <div className="nc-event">
+    <article className={`news-card tone-${col}${fresh ? ' fresh' : ''}`}>
+      <div className="nc-top">
         <EventBadge type={n.event_type} />
-        {eventLine(n, p) && <span className="nc-line">{eventLine(n, p)}</span>}
+        <ImpactBadge s={p} />
       </div>
-      {n.classifier === 'gemini' && p?.reason && <div className="reason-line">{p.reason}</div>}
+      <div className="nc-company">{p?.name || p?.ticker || 'Market'}{p && <span className="nc-ticker"> · {p.ticker}</span>}</div>
+      <h3 className="nc-headline"><Link to={`/news/${n.id}`} className="stretched">{headlineOf(n, p)}</Link></h3>
+      {summary && (
+        <div className="nc-summary-wrap">
+          <p className={`nc-summary${expanded ? '' : ' clamp'}`}>{summary}</p>
+          {long && <button type="button" className="linkish above" aria-expanded={expanded}
+            onClick={stop(() => setExpanded((v) => !v))}>{expanded ? 'Show less' : 'Show more'}</button>}
+        </div>
+      )}
       {others.length > 0 && (
         <div className="chips" aria-label="Other affected stocks">
           {others.map((s) => <StockChip key={`${s.ticker}-${s.relation}`} s={s} />)}
         </div>
       )}
-      <div className="news-foot">
-        <span className="num">{fmtTime(n.created_at, tz)} {tzAbbr(tz)} · {fmtDate(n.created_at, tz)}</span>
-        <span>{SOURCE_LABEL[n.source] ?? n.source}</span>
+      <footer className="nc-foot">
+        <span className="num">{fmtTime(n.created_at, tz)} {tzAbbr(tz)}, {fmtDate(n.created_at, tz)}</span>
+        <span>{SOURCE_NAME[n.source] ?? n.source}</span>
         {n.latency_s !== null && <span>alerted {fmtDuration(n.latency_s)} after publication</span>}
+        <span>{n.classifier === 'rules' ? 'rule-based' : n.confidence !== null ? `${Math.round(n.confidence * 100)}% confidence` : ''}</span>
         {n.linked_price_alerts.length > 0 && (
-          <span className="linked">↳ {n.linked_price_alerts.map((x) => `${x.symbol} ${pct(x.move)}`).join(', ')}</span>
+          <span>↳ {n.linked_price_alerts.map((x) => `${x.symbol} ${pct(x.move)}`).join(', ')}</span>
         )}
-      </div>
-    </a>
+      </footer>
+      {thread.items.length > 1 && (
+        <div className="nc-thread above">
+          <button type="button" className="thread-toggle" aria-expanded={open} onClick={stop(() => setOpen((v) => !v))}>
+            {thread.items.length} updates · {open ? 'hide' : 'show all'} {open ? '▴' : '▾'}
+          </button>
+          {open && (
+            <ol className="thread-list">
+              {thread.items.map((t) => (
+                <li key={t.id}>
+                  <Link to={`/news/${t.id}`}>
+                    <span className="num">{fmtTime(t.created_at, tz)}</span> {headlineOf(t, primaryStock(t))}
+                  </Link>
+                </li>
+              ))}
+            </ol>
+          )}
+        </div>
+      )}
+    </article>
   )
 }
 
 function PriceCardSmall({ a, me }: { a: Alert; me: Me }) {
   return (
-    <a className="price-card" href={`#/alerts/${a.id}`}>
+    <Link className="price-card" to={`/alerts/${a.id}`}>
       <span className="price-tag">Price move</span>
       <strong>{a.symbol}</strong>
       <Direction d={a.direction} />
       <span className="num">{pct(a.move)}</span>
-      {a.linked_news.length > 0 && <span className="muted">↳ {a.linked_news[0].minutes_after.toFixed(0)} min after news</span>}
+      {a.linked_news.length > 0 && <span className="secondary">↳ {a.linked_news[0].minutes_after.toFixed(0)} min after news</span>}
       <span className="spacer" />
-      <span className="muted num">{fmtTime(a.ts, me.timezone)} {tzAbbr(me.timezone)}</span>
-    </a>
+      <span className="secondary num">{fmtTime(a.ts, me.timezone)} {tzAbbr(me.timezone)}</span>
+    </Link>
   )
 }
 
-type Row = { kind: 'news'; t: number; n: NewsAlert } | { kind: 'price'; t: number; a: Alert }
+type Row = { kind: 'news'; t: number; th: Thread } | { kind: 'price'; t: number; a: Alert }
 const NEU_KEY = 'quantradar.neutralCollapsed'
 
 function Columns({ rows, me, freshIds, loading }: { rows: Row[]; me: Me; freshIds: Set<number>; loading: boolean }) {
@@ -139,15 +169,17 @@ function Columns({ rows, me, freshIds, loading }: { rows: Row[]; me: Me; freshId
     try { localStorage.setItem(NEU_KEY, v ? '0' : '1') } catch { /* ignore */ }
     return !v
   })
-  const col = (r: Row) => r.kind === 'news' ? columnOf(r.n) : (r.a.direction > 0 ? 'pos' : 'neg')
+  const col = (r: Row) => r.kind === 'news' ? columnOf(r.th.items[0]) : (r.a.direction > 0 ? 'pos' : 'neg')
   const groups = { pos: rows.filter((r) => col(r) === 'pos'), neg: rows.filter((r) => col(r) === 'neg'),
     neu: rows.filter((r) => col(r) === 'neu') }
-  const count = (k: 'pos' | 'neg' | 'neu') => groups[k].filter((r) => r.kind === 'news').length
+  // counts are alerts (a thread of 3 updates counts 3)
+  const count = (k: 'pos' | 'neg' | 'neu') => groups[k].reduce((acc, r) => acc + (r.kind === 'news' ? r.th.items.length : 0), 0)
   const list = (k: 'pos' | 'neg' | 'neu') => (
     <ol className="feed" aria-busy={loading}>
       {groups[k].map((r) => (
-        <li key={r.kind === 'news' ? `n${r.n.id}` : `p${r.a.id}`}>
-          {r.kind === 'news' ? <NewsCard n={r.n} me={me} fresh={freshIds.has(r.n.id)} /> : <PriceCardSmall a={r.a} me={me} />}
+        <li key={r.kind === 'news' ? r.th.key : `p${r.a.id}`}>
+          {r.kind === 'news' ? <NewsCard thread={r.th} me={me} fresh={r.th.items.some((x) => freshIds.has(x.id))} />
+            : <PriceCardSmall a={r.a} me={me} />}
         </li>
       ))}
       {groups[k].length === 0 && <li className="col-empty">Nothing here yet.</li>}
@@ -175,7 +207,7 @@ function Columns({ rows, me, freshIds, loading }: { rows: Row[]; me: Me; freshId
         <section className="col col-neu" aria-labelledby="h-neu">
           <h2 id="h-neu" className="col-head">
             <button type="button" className="col-toggle" aria-expanded={!neuCollapsed} onClick={toggleNeu}
-              title={neuCollapsed ? 'Expand' : 'Collapse'}>{neuCollapsed ? '◂' : '▸'}</button>
+              aria-label={neuCollapsed ? 'Expand the Neutral column' : 'Collapse the Neutral column'}>{neuCollapsed ? '◂' : '▸'}</button>
             <span className="col-neu-title">Neutral / watch <span className="count">{count('neu')}</span></span>
           </h2>
           {!neuCollapsed && list('neu')}
@@ -199,7 +231,7 @@ export default function NewsFeed({ me, pushedNews, pushedPrice, conn }:
   const [base, setBase] = useState({ news: 0, price: 0 })
 
   useEffect(() => {
-    const t = setTimeout(() => setFilters((f) => ({ ...f, q: qInput.trim() })), 300)
+    const t = setTimeout(() => setFilters((f) => (f.q === qInput.trim() ? f : { ...f, q: qInput.trim() })), 300)
     return () => clearTimeout(t)
   }, [qInput])
 
@@ -208,7 +240,7 @@ export default function NewsFeed({ me, pushedNews, pushedPrice, conn }:
     let cancelled = false
     setLoading(true)
     setError('')
-    const q = { symbol: filters.symbol, sector: filters.sector, direction: filters.direction, q: filters.q, limit: 50 }
+    const q = { sector: filters.sector, q: filters.q, limit: 80 }
     Promise.all([
       api.news({ ...q, event_type: filters.event_type }),
       layer === 'both' && !filters.event_type ? api.alerts(q) : Promise.resolve({ items: [] as Alert[], more: false }),
@@ -233,8 +265,9 @@ export default function NewsFeed({ me, pushedNews, pushedPrice, conn }:
 
   const rows: Row[] = useMemo(() => {
     const seenN = new Set<number>(), seenP = new Set<number>()
-    const out: Row[] = []
-    for (const n of [...liveNews, ...news]) if (!seenN.has(n.id)) { seenN.add(n.id); out.push({ kind: 'news', t: n.created_at, n }) }
+    const allNews: NewsAlert[] = []
+    for (const n of [...liveNews, ...news]) if (!seenN.has(n.id)) { seenN.add(n.id); allNews.push(n) }
+    const out: Row[] = threadNews(allNews).map((th) => ({ kind: 'news' as const, t: th.items[0].created_at, th }))
     for (const a of [...livePrice, ...price]) if (!seenP.has(a.id)) { seenP.add(a.id); out.push({ kind: 'price', t: a.ts, a }) }
     return out.sort((x, y) => y.t - x.t)
   }, [liveNews, news, livePrice, price])
@@ -242,68 +275,60 @@ export default function NewsFeed({ me, pushedNews, pushedPrice, conn }:
   async function loadMore() {
     const last = news[news.length - 1]
     if (!last) return
-    const r = await api.news({ ...filters, before_id: last.id, limit: 50 })
+    const r = await api.news({ ...filters, before_id: last.id, limit: 80 })
     setNews((cur) => [...cur, ...r.items])
     setMore(r.more)
   }
 
   const set = (patch: Partial<Filters>) => setFilters((f) => ({ ...f, ...patch }))
-  const active = filters.symbol || filters.sector || filters.direction || filters.event_type || filters.q
+  const active = filters.sector || filters.event_type || filters.q
 
   return (
     <>
       <div className="feed-head">
-        <h1>News alerts</h1>
+        <h1>{VIEW_TITLE[layer]}</h1>
         <span className="live-pill"><span className={`dot ${conn === 'open' ? 'good' : 'warn'}`} aria-hidden="true" />
-          {conn === 'open' ? 'Live: new alerts appear automatically' : 'Reconnecting…'}</span>
+          {conn === 'open' ? 'Live' : 'Reconnecting…'}</span>
         <span className="spacer" />
-        <div className="seg" role="group" aria-label="Feed layers">
-          {([['news', 'News'], ['both', 'News + price moves'], ['price', 'Price moves']] as const).map(([k, label]) => (
-            <button key={k} type="button" aria-pressed={layer === k} onClick={() => setLayer(k)}>{label}</button>
-          ))}
+        <div className="view-group">
+          <span id="view-label" className="view-label">View</span>
+          <div className="seg ctl-seg" role="group" aria-labelledby="view-label">
+            {([['news', 'News'], ['both', 'News + price moves'], ['price', 'Price moves']] as const).map(([k, label]) => (
+              <button key={k} type="button" aria-pressed={layer === k} onClick={() => setLayer(k)}>{label}</button>
+            ))}
+          </div>
         </div>
       </div>
 
-      {layer === 'price' ? <Feed me={me} pushed={pushedPrice} conn={conn} /> : (
+      {layer === 'price' ? <Feed me={me} pushed={pushedPrice} conn={conn} embedded /> : (
         <>
           <form className="filters" role="search" onSubmit={(e) => e.preventDefault()}>
-            <div className="field">
-              <label htmlFor="n-sym">Ticker</label>
-              <input id="n-sym" list="n-symbols" placeholder="Any" size={10} value={filters.symbol}
-                onChange={(e) => set({ symbol: e.target.value.toUpperCase() })} />
-              <datalist id="n-symbols">{me.symbols.map((s) => <option key={s} value={s} />)}</datalist>
-            </div>
-            <div className="field">
-              <label htmlFor="n-sector">Sector</label>
-              <select id="n-sector" value={filters.sector} onChange={(e) => set({ sector: e.target.value })}>
-                <option value="">All sectors</option>
-                {me.sectors.map((s) => <option key={s}>{s}</option>)}
-              </select>
-            </div>
-            <div className="field">
-              <label htmlFor="n-event">Event</label>
-              <select id="n-event" value={filters.event_type} onChange={(e) => set({ event_type: e.target.value })}>
-                <option value="">All events</option>
-                {me.event_types.map((s) => <option key={s}>{s}</option>)}
-              </select>
-            </div>
-            <div className="field grow">
-              <label htmlFor="n-q">Search past alerts</label>
-              <input id="n-q" type="search" placeholder="Headline, ticker or company" value={qInput}
-                onChange={(e) => setQInput(e.target.value)} />
-            </div>
-            {active && <button type="button" className="btn" onClick={() => { setFilters(EMPTY); setQInput('') }}>Clear</button>}
+            <label className="sr-only" htmlFor="n-q">Search ticker, company or headline</label>
+            <input id="n-q" className="ctl grow" type="search" placeholder="Search ticker, company or headline"
+              list="n-symbols" value={qInput} onChange={(e) => setQInput(e.target.value)} />
+            <datalist id="n-symbols">{me.symbols.map((s) => <option key={s} value={s} />)}</datalist>
+            <label className="sr-only" htmlFor="n-sector">Sector</label>
+            <select id="n-sector" className="ctl" value={filters.sector} onChange={(e) => set({ sector: e.target.value })}>
+              <option value="">All sectors</option>
+              {me.sectors.map((s) => <option key={s}>{s}</option>)}
+            </select>
+            <label className="sr-only" htmlFor="n-event">Event</label>
+            <select id="n-event" className="ctl" value={filters.event_type} onChange={(e) => set({ event_type: e.target.value })}>
+              <option value="">All events</option>
+              {me.event_types.map((s) => <option key={s}>{s}</option>)}
+            </select>
+            {active && <button type="button" className="ctl btn-ctl" onClick={() => { setFilters(EMPTY); setQInput('') }}>Clear</button>}
           </form>
           {layer === 'both' && filters.event_type && (
-            <p className="muted" style={{ marginTop: -4 }}>Price moves are hidden while an event filter is set.</p>
+            <p className="secondary" style={{ marginTop: -4 }}>Price moves are hidden while an event filter is set.</p>
           )}
           {error && <div className="empty error">{error}</div>}
           {!error && !loading && rows.length === 0 && (
-            <div className="empty">{active ? 'No alerts match these filters.'
+            <div className="empty">{active ? 'No alerts match this search.'
               : 'No news alerts yet. They appear here as soon as a filing or headline is classified.'}</div>
           )}
           <Columns rows={rows} me={me} freshIds={freshIds} loading={loading} />
-          {more && <div className="more"><button className="btn" onClick={loadMore}>Load older news alerts</button></div>}
+          {more && <div className="more"><button className="ctl btn-ctl" onClick={loadMore}>Load older news alerts</button></div>}
         </>
       )}
     </>

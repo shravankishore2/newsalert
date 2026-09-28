@@ -356,3 +356,17 @@ def test_status_includes_news_service(env):
     store.set_status("news", {"last_poll_at": T0, "pending": 3, "gemini_configured": False})
     login(client)
     assert client.get("/api/status").json()["news"]["value"]["pending"] == 3
+
+
+def test_news_alert_includes_feed_summary_for_businessline_only(env):
+    client, store, _ = env
+    store.conn.execute("INSERT INTO news_items (id, source, feed, key, url, headline, summary, fetched_at, status) "
+                       "VALUES (1, 'businessline', 'f', 'k1', 'u', 'Alpha wins order', 'Order worth Rs 500 cr from railways', 0, 'classified')")
+    store.conn.execute("INSERT INTO news_items (id, source, feed, key, url, summary, fetched_at, status) "
+                       "VALUES (2, 'nse', 'f', 'k2', 'u', 'should never be shown', 0, 'classified')")
+    add_news(store, 1)
+    add_news(store, 2, "BETA", source="nse")
+    login(client)
+    items = {i["id"]: i for i in client.get("/api/news").json()["items"]}
+    assert items[1]["summary"] == "Order worth Rs 500 cr from railways"
+    assert items[2]["summary"] is None

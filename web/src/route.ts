@@ -21,3 +21,10 @@ export function useRoute(): Route {
   }, [])
   return route
 }
+
+/** Programmatic navigation through the app's router (hash-based, so deep links and reloads work). */
+export function navigate(to: string) {
+  const target = to.startsWith('#') ? to : `#${to}`
+  if (location.hash !== target) location.hash = target
+  window.scrollTo({ top: 0 })
+}

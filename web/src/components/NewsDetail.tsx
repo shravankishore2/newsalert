@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import Link from './Link'
 import { api, fmtDate, fmtDuration, fmtTime, pct, SOURCE_LABEL, tzAbbr, type Me, type NewsDetail as Detail } from '../api'
 import { EventBadge, StockChip } from './NewsFeed'
 import PriceChart from './PriceChart'
@@ -13,14 +14,14 @@ export default function NewsDetail({ me, id }: { me: Me; id: number }) {
   // App renders this with key={id}, so each alert gets fresh state
   useEffect(() => { api.newsItem(id).then(setN).catch((e) => setError(String(e))) }, [id])
 
-  if (error) return <><a className="back" href="#/">← All alerts</a><div className="empty error">{error}</div></>
+  if (error) return <><Link className="back" to="/">← All alerts</Link><div className="empty error">{error}</div></>
   if (!n) return <p className="muted">Loading…</p>
   const tz = me.timezone
   const evaluated = n.stocks.some((s) => s.evaluated_at)
 
   return (
     <>
-      <a className="back" href="#/">← All alerts</a>
+      <Link className="back" to="/">← All alerts</Link>
       <div className="news-top" style={{ marginBottom: 6 }}>
         <EventBadge type={n.event_type} />
         <span className="muted">{SOURCE_LABEL[n.source] ?? n.source}</span>
@@ -86,7 +87,7 @@ export default function NewsDetail({ me, id }: { me: Me; id: number }) {
           <h2 id="lk">Linked price moves (within 60 min)</h2>
           <ul className="news">
             {n.linked_price_alerts.map((p) => (
-              <li key={p.id}><a href={`#/alerts/${p.id}`}>{p.symbol} {pct(p.move)}</a>
+              <li key={p.id}><Link to={`/alerts/${p.id}`}>{p.symbol} {pct(p.move)}</Link>
                 <span className="meta">{p.minutes_after.toFixed(0)} min after the news alert · {fmtTime(p.ts, tz)} {tzAbbr(tz)}</span></li>
             ))}
           </ul>

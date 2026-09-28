@@ -10,6 +10,7 @@ import NewsDetail from './components/NewsDetail'
 import AlertDetail from './components/AlertDetail'
 import Performance from './components/Performance'
 import Board from './components/Board'
+import Link from './components/Link'
 
 type Auth = 'checking' | 'out' | 'in'
 
@@ -41,7 +42,7 @@ export default function App() {
   if (auth === 'out' || !me) return <Login onDone={loadMe} />
 
   const nav = (href: string, label: string, current: boolean) => (
-    <a href={href} aria-current={current ? 'page' : undefined}>{label}</a>
+    <Link to={href} aria-current={current ? 'page' : undefined}>{label}</Link>
   )
 
   return (

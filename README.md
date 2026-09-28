@@ -86,18 +86,29 @@ Three tabs: **Alerts**, **Results**, **Model performance**.
   Negative · Neutral, with counts).
 - **Column placement:** an alert goes into a column by the direction of its **headline
   company**, meaning the first "direct" stock, or the first stock if there's none.
-- **Each card shows the company once**, as "Full name · TICKER", then the event (badge
-  plus headline). NSE filings show a label only when it adds information beyond the
-  badge, e.g. "Bonus issue" or "Key resignation (CEO/CFO/auditor)".
-- **Strength and confidence share one badge**, e.g. "High · 80%", or "Low · rules" for
-  NSE filings.
+- **Every card has the same anatomy:** the event badge and the impact badge (▲ Up /
+  ▼ Down / • Neutral, plus strength) side by side at the top, then the company as
+  "Full name · TICKER", the headline, and a summary clamped to two lines (click "Show
+  more" to expand). The summary is the BusinessLine feed summary, or else Gemini's
+  reason. NSE filings show a label only when it adds information beyond the badge,
+  e.g. "Bonus issue".
+- **A small footer holds the metadata:** time, source, "alerted X after publication",
+  and "rule-based" (NSE) or "N% confidence" (Gemini), plus any linked price moves.
+- **Duplicates are threaded.** Alerts for the same headline company and event type
+  within 60 minutes become one card (newest on top) with "N updates · show all".
 - **Chips appear only for the other affected stocks** (competitors, suppliers,
-  customers, sector peers), never repeating the headline company. The Gemini reason and
-  any linked price moves follow.
+  customers, sector peers), never repeating the headline company.
+- **Navigation** goes through the app's hash router: the headline covers the whole
+  card as one link, while buttons inside the card stay clickable.
 - **Layers:** **News**, **News + price moves** (price moves drop into the matching
   column as smaller cards) or **Price moves** only (the filterable price-alert feed).
-  Filters cover ticker, sector, event type and search. The layer and the Neutral
-  column's collapsed state are remembered.
+  The switch is labelled **View**, and the page title follows it. Filters sit in one
+  row of equal-height controls that wraps on phones: a single search (ticker, company
+  or headline), sector, event type (and direction on the price view). The view and the
+  Neutral column's collapsed state are remembered.
+- **Contrast** is computed, not eyeballed: `web/scripts/contrast.py` checks every text
+  pair at WCAG AA 4.5:1 and card borders against the page at 3:1 in both themes, and
+  `tests/test_contrast.py` fails the suite if any pair drops below.
 - **News detail** and **price-alert detail** pages are unchanged: classification and
   reasons, the event study once the session closes, linked moves, a chart vs NIFTY 50,
   and headline, source and link only.
@@ -131,8 +142,8 @@ Three tabs: **Alerts**, **Results**, **Model performance**.
 **Model performance.** The previous Results page, unchanged: the news event study and
 the price-alert replay results (false-alert rates, CIs) from `docs/RESULTS.md`.
 
-**Status bar.**
-- Market open/closed.
+**Status bar.** Market open/closed is shown prominently. Everything else sits behind
+one pill ("System OK", or "System: N warnings/problems"), which opens a popover with:
 - The last price cycle.
 - The Dhan token state.
 - The news service: last poll, feeds, alerts, pending items, Gemini's usage.

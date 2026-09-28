@@ -116,7 +116,7 @@ def _alert_json(row: sqlite3.Row, info: SiteInfo, linked: dict[int, list] | None
     return r
 
 
-NEWS_COLS = ("id, mode, created_at, published_at, source, event_type, confidence, headline, url, classifier")
+NEWS_COLS = ("id, item_id, mode, created_at, published_at, source, event_type, confidence, headline, url, classifier")
 STOCK_COLS = ("news_alert_id, ticker, relation, direction, strength, reason, t0, t0_rule, "
               "abn_15m, abn_1h, abn_close, ret_15m, ret_1h, ret_close, evaluated_at, eval_note")
 
@@ -140,9 +140,18 @@ def _news_json(conn: sqlite3.Connection, rows: list[sqlite3.Row], info: SiteInfo
         links.setdefault(l["news_alert_id"], []).append(
             {"id": l["price_alert_id"], "symbol": l["symbol"], "move": l["move"], "ts": l["ts"],
              "direction": l["direction"], "minutes_after": l["minutes_after"]})
+    # feed summary (BusinessLine only: NSE text is never stored, so NSE items have none)
+    summaries: dict[int, str] = {}
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE name='news_items'").fetchone():
+        item_ids = [r["item_id"] for r in rows]
+        for iid, summ in conn.execute(f"SELECT id, summary FROM news_items WHERE id IN ({','.join('?' * len(item_ids))}) "
+                                      f"AND source != 'nse'", item_ids):
+            if summ:
+                summaries[iid] = summ
     out = []
     for r in rows:
         d = dict(r)
+        d["summary"] = summaries.get(d["item_id"])
         d["stocks"] = stocks.get(d["id"], [])
         d["linked_price_alerts"] = links.get(d["id"], [])
         d["latency_s"] = (d["created_at"] - d["published_at"]) if d["published_at"] else None
