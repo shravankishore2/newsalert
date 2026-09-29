@@ -6,6 +6,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="robots" content="noindex, nofollow" />
     <title>QuantRadar</title>
+    <script>
+      // Light by default whatever the OS prefers; the header toggle stores a per-browser choice.
+      try { document.documentElement.dataset.theme = localStorage.getItem('qr-theme') === 'dark' ? 'dark' : 'light' }
+      catch { document.documentElement.dataset.theme = 'light' }
+    </script>
   </head>
   <body>
     <div id="root"></div>

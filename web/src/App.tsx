@@ -11,6 +11,7 @@ import AlertDetail from './components/AlertDetail'
 import Performance from './components/Performance'
 import Board from './components/Board'
 import Link from './components/Link'
+import ThemeToggle from './components/ThemeToggle'
 
 type Auth = 'checking' | 'out' | 'in'
 
@@ -58,6 +59,7 @@ export default function App() {
         </nav>
         <div className="spacer" />
         <span className="muted" style={{ fontSize: 13 }}>{me.dataset}</span>
+        <ThemeToggle />
         <button className="btn" onClick={async () => { await api.logout(); onAuthLost() }}>Log out</button>
       </header>
       <StatusBar me={me} status={status} conn={conn} />
