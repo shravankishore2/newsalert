@@ -258,8 +258,9 @@ npm --prefix web run lint
    If-Modified-Since), so an unchanged feed costs one small `304`. Every item is stored
    once, with source, link, published time and fetched time.
    - **BusinessLine:** the headline and the RSS summary. Never article text.
-   - **NSE:** only the link, the symbol (taken from the filing link), a derived label
-     and the times, because NSE's terms forbid storing its content.
+   - **NSE:** only the link, the symbol (from the filing link, or else from the item's
+     company-name title), a derived label and the times, because NSE's terms forbid
+     storing its content.
    - Items already older than 2 hours when first seen are archived but don't alert and
      aren't sent to Gemini. Otherwise the first poll would flood alerts with stale news.
 2. **Classify.** Each item gets an event type from a fixed list: results, guidance,
@@ -527,8 +528,13 @@ but the terms of use are stricter, so they decided the selection:
 | NSE announcements | **No**, local rules only | Link, symbol, derived label, times; **none of NSE's text** | NSE's terms: content "shall not be copied, modified… uploaded, transmitted, posted, stored (either in hardcopy or in an electronic retrieval system)… without prior written permission of NSE." Sending it to an LLM is uploading and transmitting it, and keeping its text is storing it. The owner chose rules-only on 2026-09-28. |
 | BusinessLine | **Yes**, headline + RSS summary, on the **free tier** | Headline, RSS summary, link, times | Its terms prohibit "transmitting… or using any Content… for **commercial or public** purposes" and allow RSS "for personal and non-commercial use". A personal classifier fits that. However, on Gemini's free tier **Google uses submitted content "to provide, improve, and develop Google products and services" and human reviewers may read it**; the paid tier doesn't. The owner chose the free tier anyway on 2026-09-28, accepting that trade-off. To change it, enable billing on the key's Google Cloud project, and the paid-tier data terms then apply. |
 
-NSE items carry the NSE symbol in their filing link (`/corporate/SYMBOL_…`), so the
-announcing company is identified exactly. BusinessLine items name their stocks through
+Most NSE items carry the symbol in their filing link (`/corporate/SYMBOL_…`). About
+four in ten don't (XBRL data files, debt-market PDFs, attachments named after a person);
+for those the item's title, which is the company name, is matched exactly (case,
+punctuation and "Limited/Ltd." ignored) against the names in `tickers.csv`. Nothing is
+fuzzy-matched, so an unmatched name is skipped rather than guessed. NSE often posts the
+same announcement twice (PDF plus an XBRL copy), so a second NSE alert for the same
+company and event type within 30 minutes is suppressed. BusinessLine items name their stocks through
 Gemini, restricted to `tickers.csv`.
 
 ## Results

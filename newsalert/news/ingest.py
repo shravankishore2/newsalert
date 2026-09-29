@@ -40,6 +40,15 @@ log = logging.getLogger(__name__)
 
 UA = "newsalert/0.3 (personal, non-commercial)"
 RULE_CONFIDENCE = 0.5   # rule-based classifications carry a fixed, stated confidence
+NSE_DUP_WINDOW_S = 1800  # NSE often posts the same announcement twice (PDF + XBRL data file)
+
+
+def company_key(name: str) -> str:
+    """Normalised company name for exact matching: 'Adani Ports & SEZ Limited' ~ 'Adani Ports & SEZ Ltd.'."""
+    s = name.lower().replace("&", " and ")
+    s = re.sub(r"[^a-z0-9 ]", " ", s)
+    s = re.sub(r"\b(limited|ltd|the)\b", " ", s)
+    return " ".join(s.split())
 
 
 @dataclass
@@ -82,6 +91,8 @@ class NewsService:
         self.gemini, self.poll_s, self.max_age_s = gemini, poll_s, max_age_min * 60
         self.min_confidence, self.mode, self.clock, self.sleep = min_confidence, mode, clock, sleep
         self.last_error: str | None = None
+        # NSE item titles are the company name; used when the link carries no symbol (XBRL, debt, odd filenames)
+        self._by_name = {company_key(n): sym for sym, n in tickers.items() if n}
         self.last_poll_at: float | None = None
         self.expectations = expectations          # optional FinnhubEarnings
         self._results_queue: list[tuple[str, float]] = []
@@ -131,6 +142,8 @@ class NewsService:
         if feed.source == "nse":
             m = re.search(r"/corporate/([A-Z0-9&\-]+)_", link)
             symbol = m.group(1) if m else None
+            if symbol not in self.tickers:        # name in memory only; just the resolved symbol is stored
+                symbol = self._by_name.get(company_key(it.findtext("title") or ""), symbol)
             rr = classify_nse(it.findtext("description") or "")       # NSE text used in memory only
             in_universe = symbol in self.tickers
             if not in_universe or rr.event_type is EventType.other or stale:
@@ -205,6 +218,7 @@ class NewsService:
                 self.last_error = str(e)
                 log.warning("gemini: %s", e)
                 break
+            self.last_error = None                # a successful call clears an earlier outage
             for o in outs:
                 self._apply(o.id, o.classification, o.rejected_tickers, o.error)
                 if o.classification is not None:
@@ -230,6 +244,11 @@ class NewsService:
             return None
         if self.store.conn.execute("SELECT 1 FROM news_alerts WHERE item_id=?", (item_id,)).fetchone():
             return None
+        if source == "nse" and self.store.conn.execute(
+                """SELECT 1 FROM news_alerts a JOIN news_alert_stocks s ON s.news_alert_id = a.id
+                   WHERE a.source = 'nse' AND a.event_type = ? AND s.ticker = ? AND a.created_at >= ?""",
+                (cls["event_type"], stocks[0]["ticker"], self.clock() - NSE_DUP_WINDOW_S)).fetchone():
+            return None                           # same filing seen again (PDF + XBRL copies)
         cur = self.store.conn.execute(
             """INSERT INTO news_alerts (item_id, mode, created_at, published_at, source, event_type, confidence,
                headline, url, classifier) VALUES (?,?,?,?,?,?,?,?,?,?)""",

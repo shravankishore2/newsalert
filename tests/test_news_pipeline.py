@@ -117,6 +117,50 @@ async def test_nse_items_classified_by_rules_and_text_never_stored():
     assert s.gemini_calls == []          # NSE never goes to the LLM
 
 
+async def test_nse_symbol_from_company_name_when_link_has_none():
+    """XBRL/debt attachments carry no SYMBOL_ prefix; the item title (company name) resolves it, in memory only."""
+    s, c = Server(), Clock()
+    pub = datetime.fromtimestamp(NOW - 120, IST).strftime("%d-%b-%Y %H:%M:%S")
+    xbrl = "https://nsearchives.nseindia.com/corporate/xbrl/REG30_PARA_B_18642_WebXMLFile_20260928_095800.xml"
+    body = (f"<item><title>Beta Steel Limited</title><link>{xbrl}</link><description>Beta Steel Limited has informed "
+            f"the Exchange about Bagging/Receiving of orders/contracts</description><pubDate>{pub}</pubDate></item>"
+            f"<item><title>Unknown Co Limited</title><link>{xbrl}2</link><description>Unknown Co Limited has informed "
+            f"the Exchange about Bagging/Receiving of orders/contracts</description><pubDate>{pub}</pubDate></item>")
+    s.feeds[NSE_URL] = f"<rss><channel>{body}</channel></rss>".encode()
+    s.feeds[BL_URL] = bl_xml([])
+    store, http, svc = make(s, c)
+    async with http:
+        await svc.run_once()
+    rows = store.conn.execute("SELECT symbol_hint, status FROM news_items ORDER BY id").fetchall()
+    assert rows == [("BETA", "classified"), (None, "skipped")]
+    assert "Beta Steel Limited" not in "\n".join(str(r) for r in store.conn.execute("SELECT * FROM news_items"))
+    assert store.conn.execute("SELECT headline FROM news_alerts").fetchall() == [("BETA: Order/contract win",)]
+
+
+async def test_nse_duplicate_copy_of_same_filing_alerts_once():
+    """NSE posts a PDF and an XBRL copy of one announcement; only the first becomes an alert."""
+    s, c = Server(), Clock()
+    pub = datetime.fromtimestamp(NOW - 120, IST).strftime("%d-%b-%Y %H:%M:%S")
+    s.feeds[NSE_URL] = nse_xml([("ALPHA", "Alpha Industries Limited", "Bagging/Receiving of orders/contracts", pub)])
+    s.feeds[BL_URL] = bl_xml([])
+    store, http, svc = make(s, c)
+    async with http:
+        await svc.run_once()
+        c.t += 300
+        xbrl = (f"<rss><channel><item><title>Alpha Industries Limited</title><link>https://nsearchives.nseindia.com/"
+                f"corporate/xbrl/CIM_1_WebXMLFile.xml</link><description>Alpha Industries Limited has informed the "
+                f"Exchange about Bagging/Receiving of orders/contracts</description><pubDate>{pub}</pubDate></item>"
+                f"</channel></rss>").encode()
+        s.feeds[NSE_URL] = xbrl
+        await svc.run_once()
+        assert store.conn.execute("SELECT COUNT(*) FROM news_items WHERE symbol_hint='ALPHA'").fetchone()[0] == 2
+        assert store.conn.execute("SELECT COUNT(*) FROM news_alerts").fetchone()[0] == 1
+        c.t += 3600                                        # a new filing later the same day is a new alert
+        s.feeds[NSE_URL] = xbrl.replace(b"CIM_1", b"CIM_2")
+        await svc.run_once()
+    assert store.conn.execute("SELECT COUNT(*) FROM news_alerts").fetchone()[0] == 2
+
+
 def test_rule_directions():
     assert classify_nse("X has informed the Exchange about Credit Rating downgraded").direction == "down"
     assert classify_nse("X has informed the Exchange about Financial Results").direction is None
@@ -342,6 +386,7 @@ async def test_gemini_server_errors_back_off_exponentially():
                             (200, {"items": [item_json(i1)]})]
         await svc.classify_pending()
         assert svc.gemini.paused_until == NOW + 360 and not svc.gemini.can_request()
+        assert "503" in (svc.last_error or "")            # shown as a warning on the dashboard
         await svc.classify_pending()                      # still paused: no request
         assert len(s.gemini_calls) == 1
         c.t += 361
@@ -351,3 +396,4 @@ async def test_gemini_server_errors_back_off_exponentially():
         await svc.classify_pending()                      # recovers
     assert store.conn.execute("SELECT status FROM news_items").fetchone()[0] == "classified"
     assert svc.gemini.server_errors == 0 and len(s.gemini_calls) == 3
+    assert svc.last_error is None                         # recovery clears the warning
