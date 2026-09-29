@@ -322,7 +322,7 @@ files are in [`deploy/`](deploy/).
 | `newsalert-evaluate.timer` | 15:50 IST on weekdays: event study, rewrites the news section of `docs/RESULTS.md` |
 | `newsalert-web.service` | Always-on dashboard over live data, on `127.0.0.1:8000` |
 | `newsalert-demo.service` | Always-on demo (replayed NSE bars, labelled as replay) on `127.0.0.1:8001` |
-| Caddy (`deploy/Caddyfile`) | HTTPS through Let's Encrypt. The live dashboard is at `https://<ip-with-dashes>.sslip.io`, the demo at `https://demo.<ip-with-dashes>.sslip.io`. sslip.io resolves those names to the IP, so no DNS is needed. SSE is streamed unbuffered (`flush_interval -1`) |
+| Caddy (`deploy/Caddyfile`) | HTTPS through Let's Encrypt. QuantRadar has its own subdomain so other apps can share the VM: live at `https://quantradar.<ip-with-dashes>.sslip.io` (now https://quantradar.68-233-96-25.sslip.io), demo at `https://demo.quantradar.<ip-with-dashes>.sslip.io` (now https://demo.quantradar.68-233-96-25.sslip.io). The old addresses (`https://<ip-with-dashes>.sslip.io`, `https://demo.<ip-with-dashes>.sslip.io`) 302-redirect there, keeping the path, query and `#/` route; a login doesn't carry across hosts, so log in once on the new address. sslip.io resolves any of these names to the IP, so no DNS is needed. The VM's `/etc/caddy/Caddyfile` is this file with the host filled in, plus other apps' blocks appended. SSE is streamed unbuffered (`flush_interval -1`) |
 
 Setup outline, in the order used:
 

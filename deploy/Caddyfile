@@ -1,25 +1,39 @@
 # HTTPS via Let's Encrypt. {$NEWSALERT_HOST} is e.g. 68-233-96-25.sslip.io (sslip.io resolves
-# a-b-c-d.sslip.io to a.b.c.d, so no DNS setup is needed; swap in your own domain any time).
-{$NEWSALERT_HOST} {
+# a-b-c-d.sslip.io and any subdomain of it to a.b.c.d, so no DNS setup is needed; swap in your
+# own domain any time). QuantRadar lives on its own subdomain so other apps can share the VM.
+
+(site_headers) {
 	encode gzip
 	header {
 		Strict-Transport-Security "max-age=31536000"
 		X-Robots-Tag "noindex, nofollow"
 		-Server
 	}
+}
+
+quantradar.{$NEWSALERT_HOST} {
+	import site_headers
 	reverse_proxy 127.0.0.1:8000 {
 		flush_interval -1   # stream server-sent events immediately
 	}
 }
 
-demo.{$NEWSALERT_HOST} {
-	encode gzip
-	header {
-		Strict-Transport-Security "max-age=31536000"
-		X-Robots-Tag "noindex, nofollow"
-		-Server
-	}
+demo.quantradar.{$NEWSALERT_HOST} {
+	import site_headers
 	reverse_proxy 127.0.0.1:8001 {
 		flush_interval -1
 	}
+}
+
+# Old addresses (before 2026-09-29). Path and query are kept; browsers carry the #/ route
+# across the redirect themselves (fragments never reach the server). 302 rather than 301 so
+# browsers don't cache the move permanently and the hosts can be reused later.
+{$NEWSALERT_HOST} {
+	import site_headers
+	redir https://quantradar.{$NEWSALERT_HOST}{uri} 302
+}
+
+demo.{$NEWSALERT_HOST} {
+	import site_headers
+	redir https://demo.quantradar.{$NEWSALERT_HOST}{uri} 302
 }
