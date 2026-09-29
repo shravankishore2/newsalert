@@ -106,8 +106,12 @@ Three tabs: **Alerts**, **Results**, **Model performance**.
   row of equal-height controls that wraps on phones: a single search (ticker, company
   or headline), sector, event type (and direction on the price view). The view and the
   Neutral column's collapsed state are remembered.
+- **Theme:** the dashboard opens in a white light theme whatever the device prefers; the
+  header's Light/Dark button switches it and each browser remembers its choice. Cards
+  use a soft shadow and a 4px coloured left edge rather than a heavy outline, impact
+  badges are tinted pills, and hover/expand states ease in (off under reduced motion).
 - **Contrast** is computed, not eyeballed: `web/scripts/contrast.py` checks every text
-  pair at WCAG AA 4.5:1 and card borders against the page at 3:1 in both themes, and
+  pair at WCAG AA 4.5:1 and the cards' coloured edges against the page at 3:1 in both themes, and
   `tests/test_contrast.py` fails the suite if any pair drops below.
 - **News detail** and **price-alert detail** pages are unchanged: classification and
   reasons, the event study once the session closes, linked moves, a chart vs NIFTY 50,

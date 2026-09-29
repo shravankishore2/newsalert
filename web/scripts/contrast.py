@@ -55,8 +55,10 @@ TEXT = [
     ("critical-ink", "surface-1", "Down label on price cards"), ("good-ink", "bg", "Up label (dashed cards)"),
     ("critical-ink", "bg", "Down label (dashed cards)"),
 ]
-FIXED = [("#ffffff", "impact-up", "impact badge Up"), ("#ffffff", "impact-down", "impact badge Down"),
-         ("#ffffff", "impact-none", "impact badge None")]
+FIXED = []
+TEXT += [("impact-up-ink", "impact-up-bg", "impact badge Up"), ("impact-down-ink", "impact-down-bg", "impact badge Down"),
+         ("impact-none-ink", "impact-none-bg", "impact badge Neutral")]
+# Card tone edges: the 4px left bar carries 3:1; the rest of the outline is a softer tint of it.
 BORDERS = [("pos-border", "bg"), ("neg-border", "bg"), ("neu-border", "bg"), ("border-strong", "bg")]
 
 fails = 0

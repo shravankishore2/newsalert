@@ -273,7 +273,8 @@ def _serve(app, cfg: dict, args) -> int:
     if host not in ("127.0.0.1", "localhost", "::1"):
         log.warning("serving on %s: anyone who can reach this address sees the login page", host)
     print(f"dashboard: http://{'127.0.0.1' if host in ('0.0.0.0', '::') else host}:{port}/", flush=True)
-    uvicorn.run(app, host=host, port=port, log_level="warning")
+    # Open SSE streams never finish on their own; cap the graceful stop so restarts take seconds.
+    uvicorn.run(app, host=host, port=port, log_level="warning", timeout_graceful_shutdown=3)
     return 0
 
 
