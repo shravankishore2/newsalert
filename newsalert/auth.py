@@ -7,6 +7,12 @@ using a TOTP computed locally from the secret shown when TOTP is set up in Dhan.
 The client ID, PIN, TOTP secret and access token are never logged: error messages
 are built without the request URL (which carries the PIN and TOTP), and
 `install_redaction` masks these values in any log record as a second line of defence.
+
+One token source. Dhan keeps one valid token per account: generating a new one
+kills the old one everywhere. The VM's newsalert-token service is the only
+place that should generate (its .env sets DHAN_TOKEN_AUTHORITY=1). Anywhere
+else, generate() refuses unless the command line carries
+--i-know-this-kills-the-vm-token (see allow_generation_here).
 """
 
 from __future__ import annotations
@@ -30,6 +36,20 @@ import httpx
 from .market import IST
 
 log = logging.getLogger(__name__)
+
+TOKEN_AUTHORITY_ENV = "DHAN_TOKEN_AUTHORITY"
+OVERRIDE_FLAG = "--i-know-this-kills-the-vm-token"
+_override = False
+
+
+def allow_generation_here() -> None:
+    """The user passed OVERRIDE_FLAG: generating here is deliberate."""
+    global _override
+    _override = True
+
+
+def generation_allowed() -> bool:
+    return os.getenv(TOKEN_AUTHORITY_ENV) == "1" or _override
 
 
 def totp(secret_b32: str, at: float | None = None, step: int = 30, digits: int = 6) -> str:
@@ -164,6 +184,11 @@ class DhanAuth:
         code rather than resending the same one."""
         if not self.can_generate:
             raise AuthError("cannot generate a Dhan token: DHAN_PIN and DHAN_TOTP_SECRET are not set")
+        if not generation_allowed():
+            raise AuthError(
+                "refusing to generate a Dhan token on this machine: a new token invalidates the one "
+                f"the VM's services are using. The VM is the token source ({TOKEN_AUTHORITY_ENV}=1 in "
+                f"its .env). To do it anyway, pass {OVERRIDE_FLAG}.")
         for attempt in range(1, attempts + 1):
             try:
                 return await self._generate_once()

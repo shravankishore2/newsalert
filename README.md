@@ -38,6 +38,7 @@ cp .env.example .env   # then fill in the values below
 | `DHAN_CLIENT_ID` | Your Dhan client ID |
 | `DHAN_PIN` | Your 6-digit Dhan PIN |
 | `DHAN_TOTP_SECRET` | The base32 secret shown when you enable TOTP in Dhan (the text form of the QR code) |
+| `DHAN_TOKEN_AUTHORITY` | `1` on the one machine that generates tokens (the VM). Anywhere else, generation refuses unless the command line has `--i-know-this-kills-the-vm-token` — Dhan keeps one token per account, so a second generator kills the first's token |
 | `DHAN_ACCESS_TOKEN` | *Alternative* to PIN + TOTP: a token from web.dhan.co. Used until it expires (24 h) and not refreshed automatically |
 | `DASHBOARD_PASSWORD` | Dashboard login (single user). Required for `serve`; `demo` generates and prints one if unset |
 | `GEMINI_API_KEY` | Classifies BusinessLine headlines (aistudio.google.com/apikey). Without it, BusinessLine items stay pending; NSE filings are still classified by rules |

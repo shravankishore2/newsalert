@@ -1,4 +1,5 @@
 import base64
+from pathlib import Path
 import logging
 import os
 import stat
@@ -245,3 +246,61 @@ async def test_invalid_totp_retried_with_next_code(tmp_path):
         auth2 = DhanAuth(http2, CLIENT_ID, PIN, SECRET, None, clock=clock, sleep=clock.sleep)
         with pytest.raises(AuthError, match="Invalid PIN"):
             await auth2.generate()                   # other errors are not retried
+
+
+# -- one token source: only the VM generates --------------------------------------------------
+async def test_generation_is_refused_off_the_token_authority(tmp_path, monkeypatch):
+    """Generating a token kills the VM's; anywhere without DHAN_TOKEN_AUTHORITY=1 it refuses,
+    whichever path asks (explicit generate or ensure() on a stale token)."""
+    import newsalert.auth as A
+    monkeypatch.delenv(A.TOKEN_AUTHORITY_ENV)
+    clock = FakeClock(T)
+    fake = FakeDhan(clock)
+    http, auth = make(tmp_path, fake, clock)
+    async with http:
+        with pytest.raises(AuthError, match="i-know-this-kills-the-vm-token"):
+            await auth.generate()
+        with pytest.raises(AuthError, match="refusing to generate"):
+            await auth.ensure()
+    assert fake.auth_calls == []                       # Dhan's token endpoint was never called
+
+
+async def test_override_flag_allows_it(tmp_path, monkeypatch):
+    import newsalert.auth as A
+    monkeypatch.delenv(A.TOKEN_AUTHORITY_ENV)
+    A.allow_generation_here()
+    clock = FakeClock(T)
+    fake = FakeDhan(clock)
+    http, auth = make(tmp_path, fake, clock)
+    async with http:
+        assert (await auth.generate()).access_token == "tok-1"
+
+
+def test_cli_token_command_refuses_without_the_flag(tmp_path, monkeypatch, capsys):
+    """`newsalert token --force` on a machine that isn't the token source fails before any
+    network call (the conftest blocks sockets, so reaching Dhan would error differently)."""
+    import newsalert.auth as A
+    from newsalert.__main__ import main
+    config = Path(__file__).resolve().parents[1] / "config.yaml"
+    monkeypatch.delenv(A.TOKEN_AUTHORITY_ENV)
+    for k, v in {"DHAN_CLIENT_ID": CLIENT_ID, "DHAN_PIN": PIN, "DHAN_TOTP_SECRET": SECRET,
+                 "DHAN_ACCESS_TOKEN": ""}.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.chdir(tmp_path)                        # token cache path resolves inside tmp
+    rc = main(["--config", str(config), "token", "--force"])
+    err = capsys.readouterr().err
+    assert rc == 1 and "refusing to generate" in err and A.OVERRIDE_FLAG in err
+    assert not (tmp_path / "data" / "dhan_token.json").exists()
+
+
+def test_override_flag_is_accepted_anywhere_on_the_command_line(monkeypatch):
+    import newsalert.__main__ as M
+    import newsalert.auth as A
+    seen = {}
+    async def fake_cmd(args, cfg):
+        seen["override"] = A._override
+        return 0
+    monkeypatch.setattr(M, "cmd_token", fake_cmd)
+    config = Path(__file__).resolve().parents[1] / "config.yaml"
+    M.main(["--config", str(config), "token", A.OVERRIDE_FLAG])
+    assert seen["override"] is True

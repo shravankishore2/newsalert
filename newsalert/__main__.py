@@ -425,6 +425,12 @@ def cmd_replay(args, cfg) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from .auth import OVERRIDE_FLAG, allow_generation_here
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if OVERRIDE_FLAG in argv:                     # accepted anywhere on the command line
+        argv.remove(OVERRIDE_FLAG)
+        allow_generation_here()
+        print(f"⚠️  {OVERRIDE_FLAG}: a token generated here kills the VM's token", file=sys.stderr)
     ap = argparse.ArgumentParser(prog="newsalert")
     ap.add_argument("--config", default="config.yaml")
     ap.add_argument("-v", "--verbose", action="store_true")
