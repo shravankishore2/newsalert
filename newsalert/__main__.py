@@ -231,6 +231,8 @@ async def cmd_fetch_history(args, cfg) -> int:
         report = await fetch_history(store, _dhan(http, cfg, auth), ins,
                                      args.days or cfg["replay"]["history_days"], datetime.now(IST))
     print(f"stored {report['bars']} bars; total {store.bar_summary('bars')}")
+    if report["rate_limited"]:
+        print(f"rate limited {report['rate_limited']} times; those instruments were requeued")
     for k in ("failed", "empty"):
         if report[k]:
             print(f"{k} ({len(report[k])}): {', '.join(report[k][:20])}{' ...' if len(report[k]) > 20 else ''}")

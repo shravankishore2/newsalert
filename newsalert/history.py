@@ -10,7 +10,7 @@ import asyncio
 import logging
 from datetime import datetime, time, timedelta
 
-from .clients import DhanClient, FetchError, Instrument
+from .clients import DhanClient, FetchError, Instrument, RateLimited
 from .market import IST
 from .store import Store
 
@@ -40,15 +40,16 @@ def session_fraction(ts_list: list[int], open_t: time, close_t: time) -> float:
 async def fetch_history(store: Store, dhan: DhanClient, instruments: list[Instrument], days: int,
                         now: datetime, *, concurrency: int = 4, open_t: time = time(9, 15),
                         close_t: time = time(15, 30), retry_pause_s: float = 30,
-                        sleep=asyncio.sleep) -> dict:
+                        max_rate_retries: int = 5, sleep=asyncio.sleep) -> dict:
     end = now.astimezone(IST)
     start = end - timedelta(days=days)
     windows = chunks(start, end)
     queue: asyncio.Queue[Instrument] = asyncio.Queue()
     for ins in instruments:
         queue.put_nowait(ins)
-    report = {"bars": 0, "failed": [], "empty": [], "out_of_session": {}, "retried": 0}
+    report = {"bars": 0, "failed": [], "empty": [], "out_of_session": {}, "retried": 0, "rate_limited": 0}
     failed_ins: list[Instrument] = []
+    limited: dict[str, int] = {}
 
     async def worker() -> None:
         while True:
@@ -61,6 +62,14 @@ async def fetch_history(store: Store, dhan: DhanClient, instruments: list[Instru
                 for s, e in windows:
                     rows += await dhan.intraday(ins, s, e, interval=1)
             except FetchError as e:
+                if isinstance(e, RateLimited):
+                    # The client has already paused the shared limiter for Retry-After: put the
+                    # instrument back rather than drop it (the 2026-10-01 archive lost 18 this way).
+                    report["rate_limited"] += 1
+                    limited[ins.symbol] = limited.get(ins.symbol, 0) + 1
+                    if limited[ins.symbol] <= max_rate_retries:
+                        queue.put_nowait(ins)
+                        continue
                 report["failed"].append(f"{ins.symbol}: {e}")
                 failed_ins.append(ins)
                 log.warning("history %s failed: %s", ins.symbol, e)

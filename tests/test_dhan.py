@@ -160,3 +160,46 @@ async def test_fetch_history_retries_transient_failures_once():
                                   sleep=clock.sleep)
     assert rep["retried"] == 1 and rep["failed"] == [] and rep["bars"] == 2
     assert 30 in clock.sleeps                    # paused before the retry pass
+
+
+async def test_fetch_history_requeues_rate_limited_instruments():
+    """Dhan 429s on the 16:00 archive (2026-10-01) used to drop the instrument for the day."""
+    clock = FakeClock(T)
+    fake = FakeDhan(clock)
+    day = int(datetime(2026, 9, 25, 9, 15, tzinfo=IST).timestamp())
+    fake.intraday["2885"] = {"timestamp": [day, day + 60], "close": [1.0, 2.0]}
+    fake.intraday["1594"] = {"timestamp": [day], "close": [3.0]}
+    calls = {"n": 0}
+
+    def limited(req):
+        if req.url.path.endswith("/charts/intraday"):
+            calls["n"] += 1
+            if calls["n"] <= 3:
+                return httpx.Response(429, headers={"Retry-After": "2"})
+        return fake.handler(req)
+
+    store = Store(":memory:")
+    http, dhan = make(fake, clock, limited)
+    ins = [Instrument("RELIANCE", "2885", "NSE_EQ", "EQUITY"), Instrument("INFY", "1594", "NSE_EQ", "EQUITY")]
+    async with http:
+        rep = await fetch_history(store, dhan, ins, days=5, now=T, sleep=clock.sleep)
+    assert rep["failed"] == [] and rep["retried"] == 0 and rep["rate_limited"] == 3
+    assert rep["bars"] == 3 and store.bar_summary("bars")[:2] == (3, 2)
+
+
+async def test_fetch_history_gives_up_on_endless_rate_limits():
+    clock = FakeClock(T)
+    fake = FakeDhan(clock)
+
+    def always(req):
+        if req.url.path.endswith("/charts/intraday"):
+            return httpx.Response(429, headers={"Retry-After": "1"})
+        return fake.handler(req)
+
+    store = Store(":memory:")
+    http, dhan = make(fake, clock, always)
+    async with http:
+        rep = await fetch_history(store, dhan, [Instrument("RELIANCE", "2885", "NSE_EQ", "EQUITY")], days=5,
+                                  now=T, max_rate_retries=2, sleep=clock.sleep)
+    assert len(rep["failed"]) == 1 and rep["failed"][0].startswith("RELIANCE: rate limited")
+    assert rep["retried"] == 1 and rep["rate_limited"] == 4   # 1 + 2 requeues, then 1 in the retry pass
