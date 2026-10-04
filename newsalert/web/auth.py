@@ -1,8 +1,8 @@
 """Single-user password login with an HMAC-signed session cookie.
 
-The password comes from DASHBOARD_PASSWORD. Sessions are signed with a per-process random
-key unless DASHBOARD_SECRET is set, so restarting the server logs everyone out.
-Failed logins are throttled.
+The password comes from DASHBOARD_PASSWORD. Sessions are signed with a key derived from the
+password and the site (live/demo), so they survive restarts and reboots, and changing the
+password logs every browser out. Failed logins are throttled.
 """
 
 from __future__ import annotations
@@ -16,6 +16,12 @@ import time
 from typing import Callable
 
 COOKIE = "newsalert_session"
+
+
+def session_key(password: str, site: str) -> bytes:
+    """Signing key for session cookies: stable across restarts, different per site, and
+    replaced whenever the password changes."""
+    return hmac.new(password.encode(), f"newsalert-session:{site}".encode(), hashlib.sha256).digest()
 
 
 class SessionSigner:

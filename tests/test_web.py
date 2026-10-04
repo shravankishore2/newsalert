@@ -370,3 +370,39 @@ def test_news_alert_includes_feed_summary_for_businessline_only(env):
     items = {i["id"]: i for i in client.get("/api/news").json()["items"]}
     assert items[1]["summary"] == "Order worth Rs 500 cr from railways"
     assert items[2]["summary"] is None
+
+
+def _app(tmp_path, password=PW, mode="live", **kw):
+    return create_app(db_path=str(tmp_path / "s.db"), info=SiteInfo(mode, "Test", "NIFTY 50", "NIFTY50", "₹",
+                                                                      "Asia/Kolkata", TICKERS, PARAMS),
+                      password=password, prices=lambda s, a, b: [], market=lambda: {"open": False},
+                      results_path="docs/RESULTS.md", static_dir=str(tmp_path / "dist"), **kw)
+
+
+def test_session_survives_a_restart_but_not_a_password_change(tmp_path):
+    first = TestClient(_app(tmp_path))
+    assert login(first).status_code == 204
+    cookie = first.cookies[COOKIE]
+
+    def me(app):
+        client = TestClient(app)
+        client.cookies.set(COOKIE, cookie)
+        return client.get("/api/me").status_code
+
+    assert me(_app(tmp_path)) == 200                                   # same password and site: a restart
+    assert me(_app(tmp_path, mode="demo")) == 401                      # demo shares the password, not the key
+    assert me(_app(tmp_path, password="a different password")) == 401
+
+
+def test_configured_session_lasts_30_days(tmp_path):
+    import yaml
+    hours = yaml.safe_load(open("config.yaml"))["dashboard"]["session_hours"]
+    assert hours == 720
+    clock = Clock()
+    client = TestClient(_app(tmp_path, session_hours=hours, clock=clock))
+    r = login(client)
+    assert f"max-age={hours * 3600}" in r.headers["set-cookie"].lower()
+    clock.t += 29 * 86400
+    assert client.get("/api/me").status_code == 200
+    clock.t += 2 * 86400
+    assert client.get("/api/me").status_code == 401

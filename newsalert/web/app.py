@@ -20,7 +20,7 @@ from typing import Awaitable, Callable
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 
-from .auth import COOKIE, PasswordCheck, SessionSigner
+from .auth import COOKIE, PasswordCheck, SessionSigner, session_key
 
 ALERT_COLS = ("id, mode, symbol, ts, direction, move, ref_ts, ref_price, price, index_move, corr, beta, "
               "fast_sma, slow_sma, fast_move, residual, latency_ms, news")
@@ -203,7 +203,7 @@ def create_app(*, db_path: str, info: SiteInfo, password: str, prices: PriceSour
 
     app = FastAPI(title="QuantRadar", docs_url=None, redoc_url=None, openapi_url=None,
                   lifespan=lifespan)
-    signer = SessionSigner(secret, ttl_s=session_hours * 3600, clock=clock)
+    signer = SessionSigner(secret or session_key(password, info.mode), ttl_s=session_hours * 3600, clock=clock)
     checker = PasswordCheck(password, clock=clock)
     app.state.info, app.state.signer, app.state.checker = info, signer, checker
 

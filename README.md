@@ -222,8 +222,9 @@ Run the monitor and the dashboard as two processes (they share `data/alerts.db`)
 - **Single user.** The password comes from `DASHBOARD_PASSWORD` and is compared in
   constant time.
 - **Session:** an HMAC-signed, HttpOnly, SameSite=Strict cookie (Secure over HTTPS)
-  that expires after 12 h. It's signed with a random per-process key, so restarting
-  the server logs you out.
+  that expires after 30 days (`dashboard.session_hours`). It's signed with a key
+  derived from the password and the site, so restarts and reboots keep you logged in,
+  and changing `DASHBOARD_PASSWORD` logs out every browser.
 - **Lockout:** 5 wrong passwords within 5 minutes lock logins for 60 s.
 - Every data endpoint and the push stream return 401 without a valid session. Only the
   login page and `/api/health` are public.

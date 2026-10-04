@@ -97,7 +97,7 @@ dashboard:
   host: 127.0.0.1            # local only; the news licences don't allow public republishing
   port: 8000
   push_poll_s: 1.0           # how often the push channel checks SQLite for new alerts
-  session_hours: 12          # login lifetime
+  session_hours: 720         # login lifetime (30 days)
 
 demo:
   # Replay datasets for demo mode. "nse" needs `fetch-history` first; "us" uses the
