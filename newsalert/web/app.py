@@ -20,6 +20,7 @@ from typing import Awaitable, Callable
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 
+from . import guest as gv
 from .auth import COOKIE, PasswordCheck, SessionSigner
 
 ALERT_COLS = ("id, mode, symbol, ts, direction, move, ref_ts, ref_price, price, index_move, corr, beta, "
@@ -189,7 +190,8 @@ def create_app(*, db_path: str, info: SiteInfo, password: str, prices: PriceSour
                clock: Callable[[], float] = time.time, context_min: int = 60,
                background: Callable[[], Awaitable[None]] | None = None,
                token_fallback: Callable[[], dict | None] | None = None,
-               calendar=None) -> FastAPI:
+               calendar=None, guest_key_file: str | None = None,
+               guest_rate: gv.RateWindow | None = None) -> FastAPI:
     @contextlib.asynccontextmanager
     async def lifespan(_app):
         task = asyncio.create_task(background()) if background else None
@@ -215,6 +217,36 @@ def create_app(*, db_path: str, info: SiteInfo, password: str, prices: PriceSour
         if not Path(db_path).exists():
             raise HTTPException(503, "no alert database yet")
         return _connect(db_path)
+
+    # -- guest gate (read-only demo; see guest.py) ------------------------------------
+    # Registered before security_headers, so its 404/405/429 answers get those headers too.
+    guest_key = gv.GuestKey(guest_key_file)
+    guest_rate = guest_rate or gv.RateWindow(120, 60)     # page + live stream, with room to click around
+    guest_bad_key = gv.RateWindow(20, 600)                # wrong keys: guessing 192 random bits is pointless, but capped
+    guest_slots = gv.StreamSlots()
+    app.state.guest_key = guest_key
+
+    def _too_many(wait: float) -> Response:
+        return Response("Too many requests.\n", 429, {"Retry-After": str(int(wait) + 1)}, media_type="text/plain")
+
+    @app.middleware("http")
+    async def guest_gate(request: Request, call_next):
+        path = request.url.path
+        if not (path == "/guest" or path.startswith("/guest/")):
+            return await call_next(request)
+        who = request.client.host if request.client else "?"   # uvicorn trusts Caddy's X-Forwarded-For
+        ok, wait = guest_rate.allow(who)
+        if not ok:
+            return _too_many(wait)
+        if not guest_key.matches(request.query_params.get("k")):
+            ok, wait = guest_bad_key.allow(who)
+            return _too_many(wait) if not ok else Response("Not found.\n", 404, media_type="text/plain")
+        if request.method not in ("GET", "HEAD"):
+            return Response("Read-only.\n", 405, {"Allow": "GET"}, media_type="text/plain")
+        resp = await call_next(request)
+        resp.headers["X-Robots-Tag"] = gv.ROBOTS
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
 
     @app.middleware("http")
     async def security_headers(request: Request, call_next):
@@ -497,12 +529,91 @@ def create_app(*, db_path: str, info: SiteInfo, password: str, prices: PriceSour
                                  media_type="text/event-stream",
                                  headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
+    # -- guest (read-only; the gate above has checked key, method and rate) --------------
+    def _guest_news(rows: list[sqlite3.Row], conn: sqlite3.Connection) -> list[dict]:
+        now_ts = market().get("now_ts") or clock()
+        return [gv.guest_news(n, prices, now_ts) for n in _news_json(conn, rows, info)]
+
+    @app.get("/guest/api/meta")
+    async def guest_meta() -> dict:
+        return {"guest": True, "banner": gv.BANNER, "mode": info.mode, "dataset": info.dataset,
+                "index_name": info.index_name, "timezone": info.timezone,
+                "event_types": ["results", "guidance", "merger/acquisition", "order/contract win", "rating change",
+                                "regulatory action", "fraud/legal", "management change", "capital raise",
+                                "dividend/buyback"],
+                "status": gv.guest_status(status_payload())}
+
+    @app.get("/guest/api/news")
+    async def guest_news_list(event_type: str = "", before_id: int | None = None, limit: int = 50) -> dict:
+        where, args = ["1=1"], []
+        if event_type:
+            where.append("event_type = ?")
+            args.append(event_type)
+        if before_id:
+            where.append("id < ?")
+            args.append(before_id)
+        limit = max(1, min(limit, 100))
+        with db() as conn:
+            if not _has_news_tables(conn):
+                return {"items": [], "more": False}
+            rows = conn.execute(f"SELECT {NEWS_COLS} FROM news_alerts WHERE {' AND '.join(where)} "
+                                f"ORDER BY id DESC LIMIT ?", (*args, limit + 1)).fetchall()
+            items = _guest_news(rows[:limit], conn)
+        return {"items": items, "more": len(rows) > limit}
+
+    async def guest_stream_events(request: Request, who: str, news_last: int, max_events: int | None):
+        """`event: news` (sanitised) and a guest status snapshot about every 5 s; no price alerts."""
+        sent, tick = 0, 0
+        status_every = max(1, round(5 / push_poll_s)) if push_poll_s > 0 else 5
+        try:
+            yield "retry: 5000\n\n"
+            while True:
+                if await request.is_disconnected():
+                    return
+                frames = []
+                if Path(db_path).exists():
+                    with _connect(db_path) as conn:
+                        if _has_news_tables(conn):
+                            rows = conn.execute(f"SELECT {NEWS_COLS} FROM news_alerts WHERE id > ? ORDER BY id LIMIT 100",
+                                                (news_last,)).fetchall()
+                            for n in _guest_news(rows, conn):
+                                news_last = n["id"]
+                                frames.append(f"id: {news_last}\nevent: news\ndata: {json.dumps(n)}\n\n")
+                if tick % status_every == 0:
+                    frames.append(f"event: status\ndata: {json.dumps(gv.guest_status(status_payload()))}\n\n")
+                for f in frames:
+                    yield f
+                    sent += 1
+                    if max_events and sent >= max_events:
+                        return
+                if not frames:
+                    yield ": keep-alive\n\n"
+                tick += 1
+                await asyncio.sleep(push_poll_s)
+        finally:
+            guest_slots.give(who)
+
+    @app.get("/guest/api/stream")
+    async def guest_stream(request: Request, max_events: int | None = None):
+        who = request.client.host if request.client else "?"
+        if not guest_slots.take(who):
+            return _too_many(30)
+        header = request.headers.get("last-event-id") or ""
+        news_last = int(header) if header.isdigit() else _max_ids()[0]
+        return StreamingResponse(guest_stream_events(request, who, news_last, max_events),
+                                 media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
+
+    @app.get("/robots.txt", include_in_schema=False)
+    async def robots() -> Response:
+        return Response("User-agent: *\nDisallow: /\n", media_type="text/plain")
+
     # -- frontend -----------------------------------------------------------------------
     dist = Path(static_dir) if static_dir else None
 
     @app.get("/{path:path}", include_in_schema=False)
     async def spa(path: str):
-        if path.startswith("api/"):
+        if path.startswith(("api/", "guest/api/")):
             raise HTTPException(404)
         if dist is None or not (dist / "index.html").exists():
             return HTMLResponse("<p>QuantRadar: frontend not built. Run <code>npm --prefix web run build</code>.</p>", 503)

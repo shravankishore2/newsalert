@@ -312,8 +312,26 @@ def cmd_serve(args, cfg) -> int:
     app = create_app(db_path=cfg["db_path"], info=info, password=_password(sec, False), token_fallback=token_from_cache,
                      calendar=cal,
                      prices=lambda s, a, b: quotes.prices_between("quotes", s, a - 1, b), market=market,
-                     push_poll_s=cfg["dashboard"]["push_poll_s"], session_hours=cfg["dashboard"]["session_hours"])
+                     push_poll_s=cfg["dashboard"]["push_poll_s"], session_hours=cfg["dashboard"]["session_hours"],
+                     guest_key_file=cfg["dashboard"].get("guest_key_file"))
     return _serve(app, cfg, args)
+
+
+def cmd_guest(args, cfg) -> int:
+    """Manage the read-only guest link. The serving process re-reads the key file, so no restart."""
+    from .web.guest import DEFAULT_KEY_FILE, DEFAULT_PUBLIC_URL, GuestKey, link
+    d = cfg["dashboard"]
+    key = GuestKey(d.get("guest_key_file") or DEFAULT_KEY_FILE)
+    base = d.get("public_url") or DEFAULT_PUBLIC_URL
+    if args.action == "rotate":
+        print(link(base, key.rotate()))
+    elif args.action == "show":
+        k = key.current()
+        print(link(base, k) if k else "no guest key (python -m newsalert guest rotate)")
+    else:
+        key.path.unlink(missing_ok=True)
+        print("guest view off")
+    return 0
 
 
 def cmd_demo(args, cfg) -> int:
@@ -454,6 +472,8 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("serve", help="dashboard over live data (run `live` alongside)")
     p.add_argument("--host")
     p.add_argument("--port", type=int)
+    p = sub.add_parser("guest", help="read-only guest link: rotate (new key), show, off")
+    p.add_argument("action", choices=["rotate", "show", "off"])
     p = sub.add_parser("demo", help="dashboard driven by replayed history; no credentials needed")
     p.add_argument("--dataset", choices=["auto", "nse", "us"], default="auto")
     p.add_argument("--speed", type=float, help="replayed market minutes per real minute (default 60)")
@@ -489,6 +509,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_serve(args, cfg)
     if args.cmd == "demo":
         return cmd_demo(args, cfg)
+    if args.cmd == "guest":
+        return cmd_guest(args, cfg)
     handler = {"token": cmd_token, "live": cmd_live, "smoke-test": cmd_smoke_test, "news": cmd_news,
                "fetch-history": cmd_fetch_history}[args.cmd]
     return asyncio.run(handler(args, cfg))

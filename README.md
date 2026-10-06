@@ -1,26 +1,101 @@
 # QuantRadar
 
-News-first market alerts for NSE (Nifty 500). The code and GitHub repo are named `newsalert`;
-the app is QuantRadar.
+**Live demo:** _link added after deploy_ (read-only, no login; see [Guest view](#guest-view-read-only-demo)).
 
-News-first market alerts for the Nifty 500.
+News-first market alerts for the NSE Nifty 500. The code and GitHub repo are named
+`newsalert`; the app is QuantRadar.
 
-- **News drives alerts.** A 24/7 service reads NSE corporate announcements and
-  BusinessLine RSS, classifies each item (event type, affected stocks, expected
-  direction and reason), and raises a news alert that is pushed live to a
-  password-protected dashboard.
-- **Prices evaluate the news.** Every minute during the NSE session, one batched DhanHQ
-  request fetches all 500 stocks plus NIFTY 50. An event study scores each news alert's
-  calls against NIFTY-relative returns.
-- **Price-move alerts are a secondary layer.** The threshold + moving-average +
-  index-correlation filter still runs. A price move within 60 minutes after a news alert
-  on the same stock is linked to that alert.
-- **Replay and demo.** Replay mode measures the price logic over Dhan 1-minute history.
-  Demo mode replays archived news and prices together.
-  Results are in [`docs/RESULTS.md`](docs/RESULTS.md).
+![QuantRadar guest view: news alerts in Positive / Negative / Neutral columns](docs/screenshots/guest-desktop.png)
 
-The original US version (Finnhub, S&P 500) is the first commit, `3a097e7`. Its measured
-results are kept in `docs/RESULTS.md`.
+<p>
+<img src="docs/screenshots/guest-phone.png" alt="Guest view on a phone" width="260">
+<img src="docs/screenshots/guest-dark.png" alt="Guest view, dark theme" width="560">
+</p>
+
+_Screenshots: the read-only guest view, headless Chrome, 2026-10-06 (after the close),
+over a copy of the live database with headline and summary text removed. The guest view
+never shows that text anyway._
+
+## What it is
+
+A 24/7 service reads NSE corporate announcements and BusinessLine's RSS feeds. It
+classifies each item (event type, affected stocks, expected direction and strength) and
+pushes a news alert to a dashboard within seconds to a few minutes of publication. During
+market hours it also polls Dhan for all 500 stocks plus NIFTY 50 every minute. Those
+prices are used to grade the news calls (an event study against NIFTY), not to generate
+the headline alerts.
+
+It is a personal research tool, not a trading system. It places no orders, and its calls
+are only as good as the measured hit rates below.
+
+## Architecture: news first, prices second
+
+```
+ NSE announcements RSS ──▶ rules.py (regex rules; NSE text is never stored)  ─┐
+ BusinessLine RSS ───────▶ gemini.py (headline + RSS summary → JSON, Pydantic) ─┤
+                                                                              ▼
+                                  ingest.py: dedupe, classify, raise news alert ──▶ SQLite
+                                                                              │
+ Dhan LTP, 500 stocks + NIFTY 50, once a minute ──▶ live.py ──▶ quotes ───────┤
+        └─▶ signals.py price-move alerts (secondary layer, linked to news ≤ 60 min)
+                                                                              │
+ evaluate.py (after the close): stock − NIFTY return at +15 min / +1 h / close ┤
+        └─▶ docs/RESULTS.md (hit rate vs 50%, Wilson CIs, small samples marked)
+                                                                              ▼
+            FastAPI ── SSE ──▶ owner dashboard (password)  and  /guest (read-only, key)
+```
+
+1. **News drives alerts.** NSE filings are classified by local rules: the filing text is
+   matched in memory and only a derived label is kept. BusinessLine headlines and summaries
+   go to Gemini (free tier, conservative caps). Gemini returns schema-checked JSON
+   restricted to Nifty 500 symbols.
+2. **Prices evaluate the news.** One batched Dhan request per minute. The event study
+   scores each directional call against NIFTY-relative returns at three horizons.
+3. **Price-move alerts are a secondary layer.** A threshold, moving-average and
+   index-correlation filter. A move within 60 minutes after a news alert on the same stock
+   is linked to it.
+
+Details are in [Architecture](#architecture) and [News pipeline](#news-pipeline) further down.
+
+## Results, honestly
+
+Full tables: [`docs/RESULTS.md`](docs/RESULTS.md). On the VM it is rewritten after every
+session.
+
+**Price-move filter (replay over 11.7M Dhan 1-minute bars).** 63 trading days
+(2026-06-30 to 2026-09-25), 500 stocks plus NIFTY 50. The MA + correlation filters cut the
+false-alert rate from **26.1% to 25.0%**: 26.1% (CI 25.3–27.0%, n = 9,555) without them,
+25.0% (CI 24.1–26.0%, n = 8,190) with them. That is about one point, and the confidence
+intervals overlap. The ~14% of alerts the filters reject are clearly worse (32.7% false),
+but they are too few to move the overall rate much. A false alert is one where the price
+gives back more than half the move within 30 minutes. The settings came from the US build
+and weren't retuned for NSE.
+
+**News calls (live, 2026-09-28 to 2026-10-06, event study of 2026-10-06).** 396 news
+alerts. Across all directional calls, the +15 min hit rate was **55.2% (CI 48.0–62.3%,
+n = 181, p = 0.18 vs 50%)**. At +1 h it was 49.4%, and to the close 43.2%. So far that is
+not distinguishable from a coin flip. Calls on the company the news is about did better
+at +15 min (60.5%, CI 52.5–68.1%, n = 147, p = 0.013). Second-order calls (peers,
+suppliers) did worse (32.4%, n = 34). These are the first eight days, one of many cuts,
+and not corrected for multiple comparisons. Treat them as a hypothesis, not a result.
+Most per-event-type groups are still under 30 calls and marked too few.
+
+## Sources, licensing, and why news text isn't public
+
+Re-checked on 2026-10-06 for the read-only guest view specifically. These are my readings
+of public terms, not legal advice. Anything not clearly allowed is marked unconfirmed.
+
+| Source | What the terms say | What the public guest view does | Status |
+|---|---|---|---|
+| **BusinessLine** (THG Publishing) RSS | Users are "prohibited from modifying, copying, distributing, transmitting, displaying, publishing… or using any Content… for commercial or public purposes". Separately: "User is granted a limited, revocable and non exclusive right to create hyperlinks to the home page or any other page", provided links aren't misleading and use no logos. Also "prohibits caching, unauthorized hypertext links & the framing of any Content". | **No headline, summary or Gemini reason text.** Gemini's one-line reasons turned out to be close paraphrases of the headline, so they are dropped too. The guest view shows event type, tickers, direction, strength and a reasoning line the server writes from those fields, plus a plain link to the article (no logo, no framing). | Linking: **allowed** (explicit grant). Showing our own classification derived from the article: **unconfirmed**, since it could count as "using… Content for public purposes". |
+| **NSE** corporate announcements RSS | Content "shall not be copied… stored… displayed… disseminated… published, hyperlinked… in any form, without prior written permission of NSE". The Hyperlinking Policy: "Prior written permission is required before hyperlinks are directed from any third-party website to this Website" (request via nsewebmaster@nse.co.in). | **No filing text (never stored anyway) and no link.** Cards say "NSE" as the source; `LINKABLE_SOURCES` in `newsalert/web/guest.py` keeps NSE links off. | Links: **not allowed without permission**, so none are shown. Showing a rule-derived event type and direction for a filing: **unconfirmed**. |
+| **Dhan** market data (Data API) | "You agree not to sell, license, distribute, copy, modify, publicly perform or display, transmit, publish, edit, adapt, create derivative works from… the materials." No clause specific to API data (re-checked `dhan.co/terms`). NSE's market-data licensing may also apply. | **No prices.** Only percentage moves (since the alert; at +15 min, +1 h and close, plain and vs NIFTY), computed on the server. | **Unconfirmed.** A % move is still derived from Dhan data. Ask Dhan support before relying on it. |
+| **Gemini** (free tier) | Google may use submitted content to improve its products; human reviewers may read it. | Not shown to guests. Headlines are sent to Gemini on the owner's decision of 2026-09-28 (see [Sending news to an LLM](#sending-news-to-an-llm-reviewed-2026-09-28)). | Owner decision. |
+
+**Why news text isn't public:** neither publisher allows republishing it. The owner's
+dashboard (password, single user) shows BusinessLine headlines as personal use. The public
+view shows only what we derive, plus a link where the publisher allows one. NSE filing
+text is never stored at all.
 
 ## Setup
 
@@ -244,6 +319,38 @@ Run the monitor and the dashboard as two processes (they share `data/alerts.db`)
 - **Latency:** the stored `latency_ms` covers quote received → alert committed.
   Reaching the browser adds up to one poll interval.
 
+### Guest view (read-only demo)
+
+`/guest?k=<key>` on the live dashboard is a public, read-only copy of the news feed. It
+follows the same rules as ORBITAL's guest view:
+
+- **No password, no session, no state changes.** Guests get no cookie. Any method other
+  than GET is a 405. The key opens only `/guest`, `/guest/api/meta`, `/guest/api/news`
+  and `/guest/api/stream`; every `/api/*` endpoint still answers 401.
+- **Rotatable key, outside the repo.** It lives in `~/.quantradar_guest_key` (mode 600) on
+  the VM. The server re-reads it when the file changes, so rotating needs no restart:
+
+  ```bash
+  .venv/bin/python -m newsalert guest rotate   # new key; prints the new link; the old one stops working
+  .venv/bin/python -m newsalert guest show     # print the current link
+  .venv/bin/python -m newsalert guest off      # delete the key: every /guest URL answers 404
+  ```
+
+  A wrong or missing key gets a plain 404, so the page doesn't confirm it exists.
+- **Rate-limited per client IP** (uvicorn trusts Caddy's `X-Forwarded-For`): 120 requests
+  a minute, 20 wrong keys per 10 minutes, and at most 3 open live streams per IP (60 in
+  total). Over the limit gets a 429 with `Retry-After`.
+- **Not indexed.** `X-Robots-Tag: noindex, nofollow, noarchive`, the page's robots meta,
+  and `robots.txt` disallowing everything. `Referrer-Policy: no-referrer` keeps the key out
+  of the publishers' logs when a guest follows a link.
+- **No third-party text, no prices.** Responses are built from a whitelist
+  (`GUEST_NEWS_FIELDS` in `newsalert/web/guest.py`): event type, tickers, direction,
+  strength, a server-written reasoning line, times, source name, a link where allowed, and
+  % moves. `tests/test_guest.py` plants a headline, a summary, a Gemini reason and raw
+  prices in the database. It fails if any of them reaches the guest list, stream or meta
+  endpoints, and it was checked to fail when a leak is introduced. See
+  [Sources, licensing](#sources-licensing-and-why-news-text-isnt-public) for why.
+
 ### Frontend development
 
 ```bash
@@ -367,8 +474,11 @@ their own Data API results counts. NSE's own market-data licensing may also appl
 
 Until Dhan confirms in writing:
 
-- Treat the dashboard, demo included, as **personal use only**.
-- Don't share the password or make the demo public.
+- Treat the password-protected dashboard and the replay demo as **personal use only**.
+- Don't share the password or make the replay demo public.
+- The public [guest view](#guest-view-read-only-demo) shows no Dhan prices, only % moves.
+  Whether even those are allowed is **unconfirmed** (re-checked 2026-10-06; see the
+  [licensing table](#sources-licensing-and-why-news-text-isnt-public)).
 - Ask Dhan support (dhan.co/support) before showing it to anyone else.
 
 ## Universe
@@ -538,14 +648,13 @@ same announcement twice (PDF plus an XBRL copy), so a second NSE alert for the s
 company and event type within 30 minutes is suppressed. BusinessLine items name their stocks through
 Gemini, restricted to `tickers.csv`.
 
-## Results
+## Results (detail)
 
 See [`docs/RESULTS.md`](docs/RESULTS.md).
 
-**News-driven alerts:** no measurements yet. The news archive starts when the news
-service first runs (2026-09-28), and the event study needs sessions with news alerts and
-live prices behind them. RESULTS.md is rewritten after each session, marks groups under
-30 calls as too few, and reports only what the data shows.
+**News-driven alerts:** the first numbers are summarised in [Results, honestly](#results-honestly).
+RESULTS.md on the VM is rewritten after each session, marks groups under 30 calls as too
+few, and reports only what the data shows. The committed copy can lag behind it.
 
 **Price-move alerts** (replay):
 

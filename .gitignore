@@ -9,3 +9,4 @@ data/
 # local project notes (never committed)
 CLAUDE.md
 TASKS.md
+.DS_Store

@@ -98,6 +98,10 @@ dashboard:
   port: 8000
   push_poll_s: 1.0           # how often the push channel checks SQLite for new alerts
   session_hours: 12          # login lifetime
+  # Read-only guest view (/guest?k=<key>) on the live dashboard: no headline/filing text, no prices.
+  # The key file lives outside the repo; `python -m newsalert guest rotate|show|off` manages it.
+  guest_key_file: ~/.quantradar_guest_key
+  public_url: https://quantradar.68-233-96-25.sslip.io
 
 demo:
   # Replay datasets for demo mode. "nse" needs `fetch-history` first; "us" uses the
