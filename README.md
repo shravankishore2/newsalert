@@ -1,6 +1,8 @@
 # QuantRadar
 
-**Live demo:** _link added after deploy_ (read-only, no login; see [Guest view](#guest-view-read-only-demo)).
+**Live demo:** https://quantradar.68-233-96-25.sslip.io/guest?k=IorwZnjUvG5Zay9RqhFh91rCFKzIIuYu
+(read-only, no login; see [Guest view](#guest-view-read-only-demo)). The key is rotated now and
+then; if the link stops working, it has been replaced.
 
 News-first market alerts for the NSE Nifty 500. The code and GitHub repo are named
 `newsalert`; the app is QuantRadar.
@@ -342,8 +344,9 @@ follows the same rules as ORBITAL's guest view:
 - **Rate-limited per client IP** (uvicorn trusts Caddy's `X-Forwarded-For`): 120 requests
   a minute, 20 wrong keys per 10 minutes, and at most 3 open live streams per IP (60 in
   total). Over the limit gets a 429 with `Retry-After`.
-- **Not indexed.** `X-Robots-Tag: noindex, nofollow, noarchive`, the page's robots meta,
-  and `robots.txt` disallowing everything. `Referrer-Policy: no-referrer` keeps the key out
+- **Not indexed.** An `X-Robots-Tag` noindex header (the app sets it on guest responses;
+  Caddy sets `noindex, nofollow` on every response), the page's robots meta, and a
+  `robots.txt` that disallows everything. `Referrer-Policy: no-referrer` keeps the key out
   of the publishers' logs when a guest follows a link.
 - **No third-party text, no prices.** Responses are built from a whitelist
   (`GUEST_NEWS_FIELDS` in `newsalert/web/guest.py`): event type, tickers, direction,
@@ -351,7 +354,11 @@ follows the same rules as ORBITAL's guest view:
   % moves. `tests/test_guest.py` plants a headline, a summary, a Gemini reason and raw
   prices in the database. It fails if any of them reaches the guest list, stream or meta
   endpoints, and it was checked to fail when a leak is introduced. See
-  [Sources, licensing](#sources-licensing-and-why-news-text-isnt-public) for why.
+  [Sources, licensing](#sources-licensing-and-why-news-text-isnt-public) for why. On
+  2026-10-07 the live guest feed (100 alerts) was also compared with all 1,506 headlines,
+  summaries and Gemini reasons stored on the VM. The only 6-word overlaps were in
+  BusinessLine article URLs, whose slugs repeat the headline; that link is what the
+  publisher's terms allow.
 
 ### Frontend development
 
