@@ -1,7 +1,8 @@
-import csv
+import httpx
+import pytest
 
 from newsalert.config import load_tickers
-from newsalert.universe import build_universe, write_tickers
+from newsalert.universe import NIFTY500_URL, build_universe, download_nifty500, write_tickers
 
 NIFTY = """Company Name,Industry,Symbol,Series,ISIN Code
 Reliance Industries Ltd.,Oil Gas & Consumable Fuels,RELIANCE,EQ,INE002A01018
@@ -24,8 +25,23 @@ def test_maps_nse_equity_ids_and_reports_unmapped(tmp_path):
     assert load_tickers(tmp_path / "t.csv")[0].security_id == "2885"
 
 
-def test_shipped_tickers_csv_is_complete():
-    rows = list(csv.DictReader(open("tickers.csv")))
-    assert len(rows) == 500
-    assert all(r["security_id"].isdigit() for r in rows)
-    assert len({r["symbol"] for r in rows}) == 500 and len({r["security_id"] for r in rows}) == 500
+def test_download_is_one_request_for_nses_file():
+    seen = []
+
+    def handler(req):
+        seen.append(str(req.url))
+        return httpx.Response(200, text=NIFTY)
+    with httpx.Client(transport=httpx.MockTransport(handler)) as http:
+        assert download_nifty500(http) == NIFTY
+    assert seen == [NIFTY500_URL]
+
+
+def test_download_refuses_a_block_page():
+    with httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(200, text="<html>Access Denied</html>"))) as http:
+        with pytest.raises(ValueError, match="not NSE's Nifty 500 CSV"):
+            download_nifty500(http)
+
+
+def test_missing_tickers_csv_says_how_to_build_it(tmp_path):
+    with pytest.raises(SystemExit, match="build-universe --download"):
+        load_tickers(tmp_path / "tickers.csv")

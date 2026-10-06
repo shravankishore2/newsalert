@@ -56,6 +56,9 @@ def load_secrets(env_file: str | Path = ".env") -> Secrets:
 
 
 def load_tickers(path: str | Path) -> list[Ticker]:
+    if not Path(path).exists():
+        from .universe import MISSING_HELP
+        raise SystemExit(f"{path} not found: {MISSING_HELP}")
     with open(path, newline="") as f:
         return [Ticker(r["symbol"].strip(), r.get("name", "").strip(), r["security_id"].strip())
                 for r in csv.DictReader(f)]

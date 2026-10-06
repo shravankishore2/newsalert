@@ -137,9 +137,14 @@ def cmd_is_trading_window(args, cfg) -> int:
 
 
 def cmd_build_universe(args, cfg) -> int:
-    from .universe import SCRIP_MASTER_URL, build_universe, write_tickers
-    nifty = Path(args.nifty500_csv).read_text()
-    scrip = httpx.get(SCRIP_MASTER_URL, timeout=120).text
+    import hashlib
+    from .universe import SCRIP_MASTER_URL, build_universe, check_nifty500, download_nifty500, write_tickers
+    if bool(args.download) == bool(args.nifty500_csv):
+        raise SystemExit("give either --download or the path of ind_nifty500list.csv")
+    with httpx.Client() as http:
+        nifty = download_nifty500(http) if args.download else check_nifty500(Path(args.nifty500_csv).read_text())
+        scrip = http.get(SCRIP_MASTER_URL, timeout=120).text
+    print(f"NSE list: {len(nifty.splitlines()) - 1} rows, SHA-256 {hashlib.sha256(nifty.encode()).hexdigest()}")
     rows, missing = build_universe(nifty, scrip)
     write_tickers(cfg["tickers_file"], rows)
     print(f"wrote {len(rows)} tickers to {cfg['tickers_file']}")
@@ -243,6 +248,9 @@ async def cmd_fetch_history(args, cfg) -> int:
 
 def _ticker_info(path: str, sector_col: str) -> dict[str, dict]:
     import csv
+    from .universe import MISSING_HELP
+    if not Path(path).exists():
+        raise SystemExit(f"{path} not found: {MISSING_HELP}")
     with open(path, newline="") as f:
         return {r["symbol"]: {"name": r.get("name", ""), "sector": r.get(sector_col, "")} for r in csv.DictReader(f)}
 
@@ -453,8 +461,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--config", default="config.yaml")
     ap.add_argument("-v", "--verbose", action="store_true")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    p = sub.add_parser("build-universe", help="rebuild tickers.csv from NSE's Nifty 500 CSV + Dhan scrip master")
-    p.add_argument("nifty500_csv", help="ind_nifty500list.csv downloaded by hand from NSE")
+    p = sub.add_parser("build-universe", help="build tickers.csv from NSE's Nifty 500 CSV + Dhan scrip master")
+    p.add_argument("nifty500_csv", nargs="?", help="ind_nifty500list.csv downloaded by hand from NSE")
+    p.add_argument("--download", action="store_true", help="fetch NSE's published ind_nifty500list.csv (one request)")
     p = sub.add_parser("token", help="generate/refresh the Dhan access token via TOTP")
     p.add_argument("--force", action="store_true", help="generate even if the cached token is still valid")
     p = sub.add_parser("live", help="poll Dhan LTP during NSE hours and send alerts")

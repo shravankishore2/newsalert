@@ -104,6 +104,7 @@ uv venv --python 3.12 .venv
 uv pip install --python .venv -e '.[dev]'
 npm --prefix web install && npm --prefix web run build   # dashboard frontend (Node 20+)
 cp .env.example .env   # then fill in the values below
+.venv/bin/python -m newsalert build-universe --download  # builds tickers.csv (not in the repo, see Universe)
 ```
 
 `.env` (gitignored) needs:
@@ -143,7 +144,8 @@ Dhan account prerequisites:
 .venv/bin/python -m pytest                             # offline test suite
 ```
 
-`build-universe <ind_nifty500list.csv>` rebuilds `tickers.csv` (see *Universe*).
+`build-universe --download` (or `build-universe <ind_nifty500list.csv>` with a copy you
+downloaded by hand) builds `tickers.csv` (see *Universe*).
 
 ## Dashboard
 
@@ -484,21 +486,31 @@ Until Dhan confirms in writing:
 ## Universe
 
 `tickers.csv` holds the **500 Nifty 500 constituents**. Columns: symbol, name, industry,
-ISIN, Dhan security ID.
+ISIN, Dhan security ID. **It isn't in the repo**, because it is derived from NSE's file.
+Build it once after cloning, and again after NSE's semi-annual index reviews:
+
+```bash
+.venv/bin/python -m newsalert build-universe --download             # one request for NSE's published CSV
+.venv/bin/python -m newsalert build-universe ind_nifty500list.csv   # or a copy downloaded by hand
+```
 
 - **Source:** NSE's official index file `ind_nifty500list.csv`, from
   `https://nsearchives.nseindia.com/content/indices/ind_nifty500list.csv`. The same file is
-  published by NSE Indices at niftyindices.com. Downloaded **2026-09-27**; SHA-256
-  `c043bdc21e6080f119a86eb28cdc9b3a6009d3baffa9b5d35e9ca41b195b4501`.
+  published by NSE Indices at niftyindices.com. The command prints the file's row count
+  and SHA-256. The universe running on the VM was built from the 2026-09-27 download
+  (SHA-256 `c043bdc21e6080f119a86eb28cdc9b3a6009d3baffa9b5d35e9ca41b195b4501`). A
+  download on 2026-10-07 differed by 27 additions and 27 removals.
+- **Why a download is acceptable:** NSE's terms prohibit "systematic or automated data
+  collection", but they exempt information or content "available for download". This is
+  one request for a file NSE publishes for download, run by hand, never on a timer. If
+  NSE blocks it (it sometimes answers non-browser clients with an HTML page, which the
+  command detects), download the file in a browser and pass its path.
 - The file lists 501 rows. `DUMMYHEG` ("Dummy HEG Ltd.", ISIN `DUM545A01024`) is a
   placeholder NSE uses around corporate actions. It has no tradable instrument and is
   excluded.
 - Security IDs come from Dhan's public scrip master
   (`images.dhan.co/api-data/api-scrip-master-detailed.csv`), matched on ISIN for NSE
   cash-segment equities. All 500 matched.
-- The index constituents change at NSE's semi-annual reviews. To refresh, download the
-  CSV by hand (NSE's terms forbid automated collection, see below) and run
-  `build-universe`.
 
 ## Architecture
 

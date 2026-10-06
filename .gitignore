@@ -10,3 +10,5 @@ data/
 CLAUDE.md
 TASKS.md
 .DS_Store
+# derived from NSE's Nifty 500 list: build it with `python -m newsalert build-universe --download`
+/tickers.csv
